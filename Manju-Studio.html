@@ -4,6 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#12121a">
+  <script>
+  (() => {
+    let theme = "dark";
+    try { if (localStorage.getItem("manju-interface-theme") === "light") theme = "light"; } catch {}
+    const apply = value => {
+      document.documentElement.dataset.theme = value;
+      document.querySelector('meta[name="theme-color"]').content = value === "light" ? "#f4f8f6" : "#12121a";
+    };
+    apply(theme);
+    document.addEventListener("DOMContentLoaded", () => {
+      const toggle = document.getElementById("theme-toggle");
+      toggle.setAttribute("aria-pressed", String(theme === "light"));
+      toggle.addEventListener("click", () => {
+        theme = theme === "light" ? "dark" : "light";
+        apply(theme);
+        toggle.setAttribute("aria-pressed", String(theme === "light"));
+        try { localStorage.setItem("manju-interface-theme",theme); } catch {}
+      });
+    });
+  })();
+  </script>
   <meta name="description" content="从一句故事开始，做出自己的第一集漫剧。">
   <title>漫剧工坊</title>
   <style>
@@ -48,6 +69,27 @@ button[aria-busy=true]::before{content:"";display:inline-block;width:.85em;heigh
   @keyframes studio-spin{to{transform:rotate(360deg)}}
 }
 @media(max-width:600px){.storyboard .card-header,.ref-panel{padding:12px}.storyboard .actions{gap:6px}.storyboard .actions .button{white-space:normal}}
+:root[data-theme=light]{color-scheme:light;--bg:#f4f8f6;--panel:#fff;--pane:#edf5f1;--line:#cfdfd7;--muted:#53695e;--text:#1a3127;--accent:#146449;--active:#def2e7;--dark:#153d2e}
+html[data-theme=light]{
+  & .sidebar,& dialog{background:#fff;border-color:var(--line)}
+  & .card{box-shadow:0 3px 14px #233f2e09}
+  & .card-header{background:linear-gradient(110deg,#eff8f2,#fff 85%)}
+  & .button,& .step-icon,& .icon-button,& .strip,& .finish-info div,& .thumbs button,& .shot-image,& .ref-slot img{background:var(--pane);color:var(--text)}
+  & .button.secondary,& .button.quiet,& .shot,& .ref-slot,& .field input,& .field textarea,& .field select{background:#fff;color:var(--text);border-color:var(--line)}
+  & .field input::placeholder,& .field textarea::placeholder,& .shot-meta span:last-child{color:var(--muted)}
+  & .brand-mark,& .button.primary{background:var(--accent);color:white}
+  & .sidebar nav button:hover,& .sidebar nav button[aria-current=step],& .sidebar nav button[aria-current=step] .step-icon,& .shot[aria-pressed=true],& .notice,& .video-tools,& .add-shot{background:var(--active);color:#174d36;border-color:#97c5aa}
+  & .shot[aria-pressed=true],& .ref-slot:focus-within{border-color:var(--accent)}
+  & .shot-framing,& .plain-button,& .writing-options summary{color:var(--accent)}
+  & .empty-shot{background:#e8f2ec;color:var(--text)} & .empty-shot small{color:var(--muted)}
+  & .stage-caption{color:white} & .stage-wrap{background:#dfe9e3}
+  & .toast{background:#204d39;color:white;border-color:#397757}
+  & .button.danger,& .timing.warn{color:#9e382f}
+  & :focus-visible{outline-color:var(--accent)}
+}
+#theme-toggle[aria-pressed=true]{background:#def2e7;border-color:#97c5aa;color:#174d36}
+#theme-toggle[aria-pressed=true]::before{content:"✓";margin-right:.35em}
+@media(max-width:820px){.topbar{flex-wrap:wrap}.top-actions{max-width:100%;flex-wrap:wrap}}
 </style></head>
 <body>
   <div class="shell">
@@ -64,7 +106,7 @@ button[aria-busy=true]::before{content:"";display:inline-block;width:.85em;heigh
     <main>
       <header class="topbar">
         <div class="heading"><span id="breadcrumb"></span><h1 id="heading">做分镜</h1></div>
-        <div class="top-actions"><button id="portable-save" class="button secondary" type="button">保存项目网页</button><button id="preview" class="button secondary" type="button"><span aria-hidden="true">▷</span> 播放预览</button><button id="next" class="button primary" type="button">导出成片</button></div>
+        <div class="top-actions"><button id="theme-toggle" class="button secondary" type="button" aria-pressed="false">浅色模式</button><button id="portable-save" class="button secondary" type="button">保存项目网页</button><button id="preview" class="button secondary" type="button"><span aria-hidden="true">▷</span> 播放预览</button><button id="next" class="button primary" type="button">导出成片</button></div>
       </header>
       <div id="workspace"></div>
     </main>

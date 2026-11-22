@@ -120,11 +120,33 @@ const storyTemplates = {
 };
 
 const visualStyles = {
-  real: { label: "现场写实", direction: "实景摄影，自然肤色和现场光源，保留真实材质、人物比例和可辨认的操作细节。" },
-  cinema: { label: "电影感国漫", direction: "细腻线稿，写实比例，冷暖对比明显，电影感光影。保持同一集的配色和笔触。" },
-  anime: { label: "日系动画", direction: "干净轮廓线，二维赛璐珞上色，层次清楚的色块和柔和背景光。保持同一集的线条和配色。" },
-  ink: { label: "黑白漫画", direction: "纯黑白墨线、网点与排线，高反差明暗，保留干净留白。全镜保持黑白，无彩色光效。" }
+  real: { label:"现场写实", direction:"纪实摄影质感，平视观察，保留皮肤纹理、衣料折痕与磨损痕迹。窗光或现场灯形成可追溯的阴影，肤色自然，环境细节可辨。", negative:"磨皮蜡像脸，假景深，过度锐化，高饱和滤镜" },
+  cinema: { label:"电影感国漫", direction:"写实头身比，细线勾出人物轮廓，以分层厚涂刻画衣料和建筑。环境冷光与局部暖光分开，前中后景有清楚的明度层次。", negative:"塑料高光，游戏界面，人物比例忽大忽小，满屏光粒" },
+  anime: { label:"日系动画", direction:"二维手绘赛璐珞，轮廓线外粗内细，头发按发束分组。脸部用两级色块塑形，背景手绘透视，反光沿物体边缘收住。", negative:"真人皮肤纹理，三维塑料材质，发丝噪点，五官位置漂移" },
+  ink: { label:"黑白漫画", direction:"墨线与黑白实块建立主体剪影，阴影按形体走向排线，中间调用疏密网点区分，亮部留白，远处细节减淡。", negative:"彩色光晕，灰雾糊脸，网点摩尔纹，额外对白框" },
+  corporate: { label:"企业品牌实拍", direction:"商业摄影，校正建筑垂直线，设备表面保留拉丝、玻璃和哑光材质差异。侧向柔光勾出产品边缘，品牌色只作局部点缀，工作动作可读。", negative:"虚构品牌标识，镜面过曝，悬浮零件，夸张广角畸变" },
+  civic: { label:"政务民生纪实", direction:"平视中景交代办事人与工作人员的位置，均匀日光保留面部细节，窗口、设施和通行路线清楚，服饰和环境用色克制。", negative:"虚构公章或标语，摆拍式列队，过度美颜，舞台追光" },
+  watercolor: { label:"水彩绘本", direction:"冷压纸纹，透明水色分层罩染，湿画法让远景边缘自然洇开。人物五官与关键物件用干笔收边，以纸白保留亮部。", negative:"油亮塑料感，硬边铺满背景，纸面脏灰，厚重黑描边" },
+  brush: { label:"东方水墨", direction:"用墨色浓淡区分远近，枯笔表现粗糙表面，淡墨湿染形成空气感。关键人物的眉眼与手势用实线勾准，局部单色点染。", negative:"全景均匀模糊，荧光色，西式油画刀痕，无关题字印章" },
+  retro: { label:"复古胶片", direction:"细颗粒胶片质感，中等反差，暗部带少量冷色，肤色温暖。高光柔和滚降，保留旧木、布料和金属的真实纹理。", negative:"过量漏光，粗颗粒遮脸，伪日期水印，暗部死黑" },
+  clay: { label:"黏土定格", direction:"微缩布景和手塑黏土人物，表面有轻微指纹与压痕。柔光箱从侧上方照明，接触阴影压实脚底，道具比例与角色匹配。", negative:"金属镜面皮肤，悬空脚底，写实毛孔，肢体接缝断裂" }
 };
+
+function styleTerms(author) {
+  const key = author.look || "cinema";
+  const saved = author.styleEdits?.[key] || {};
+  const preset = visualStyles[key];
+  return {positive:saved.positive ?? preset?.direction ?? "", negative:saved.negative ?? preset?.negative ?? ""};
+}
+function styleInstructions(author) {
+  const terms = styleTerms(author);
+  return [styleLabel(author),terms.positive && "正向提示词："+terms.positive,terms.negative && "负面提示词（避免出现）："+terms.negative].filter(Boolean).join("\n");
+}
+function styleFields(author) {
+  const terms = styleTerms(author);
+  return '<div class="writing-options-fields">'+[["positive","正向提示词","想要的光线、配色、笔触和材质"],["negative","负面提示词","希望避免的画面特征"]].map(([key,label,hint]) =>
+    '<label class="field">'+label+'<textarea data-style-term="'+key+'" maxlength="700" placeholder="'+hint+'">'+escapeHtml(terms[key])+'</textarea></label>').join("")+'</div>';
+}
 const framingOptions = {
   wide: "全景 · 建立空间",
   detail: "局部特写 · 手或道具",
@@ -363,7 +385,7 @@ function generationPrompt(project, index) {
   const finalBeat = Math.round(shot.seconds * .8 * 10) / 10;
   return [
     "图生视频｜9:16 竖屏｜480p｜目标 " + shot.seconds + " 秒｜" + styleLabel(project.author),
-    "画面风格：" + (project.author.look === "custom" && project.author.artStyle?.trim() ? project.author.artStyle.trim() : visualStyles[activeLook(project.author)].direction),
+    "画面风格：" + styleInstructions(project.author),
     "分镜 " + (index + 1) + "：" + (shot.name || "未命名分镜") + "。以上传的本镜首帧为准。",
     bound.length ? "本镜出场：" + bound.map(role => role.name).join("、") + "。将以下参考图作为人物身份依据。" : cast,
     ...bound.map((role, i) => "人物参考" + (i + 1) + "：" + role.name + "，使用" + (role.sheet ? "该角色正面、侧面、背面三视图" : "该角色原始参考图") + "。锁定" + (role.notes?.trim() || "脸型、发际线、发色、服装轮廓、鞋型与饰物所在身体侧") + "。"),
@@ -495,7 +517,7 @@ function runCharacterServer() {
 }
 function sheetPrompt(role, author) {
   return [
-    "根据随附的「" + role.name + "」参考图，画一张横版角色设定三视图。画风：" + styleLabel(author) + "。",
+    "根据随附的「" + role.name + "」参考图，画一张横版角色设定三视图。画风：" + styleInstructions(author) + "。以下三视图构图、背景与照明要求优先。",
     "左、中、右分别放同一角色的正面、严格90°侧面、180°背面。三个人形都是头到脚全身、同一身高、同一地平线，脚底齐平；全身轮廓互不重叠。",
     "平视正交构图，素色背景，均匀柔光，双臂自然略离开躯干。对照参考保留脸型、眉眼间距、发际线、发型轮廓、体型比例、衣物层次、鞋型和配饰所在的身体侧。背面显示发尾与衣物背部结构。",
     role.notes ? "必须保留的细节：" + role.notes : "参考图可见的细节优先。缺失部分用最简洁、与可见服装一致的设计补全。",
@@ -783,7 +805,7 @@ function frameBrief(shot) {
     sceneIndex ? "参考图"+sceneIndex+"仅作场景依据。沿用空间布局、材质和光色。本镜出场人物以本镜剧本和角色参考为准。" : "",
     visualIndex ? "参考图"+visualIndex+"用于本镜构图、姿态或道具细节。人物身份沿用角色图，地点沿用场景设定。" : "",
     "构图：" + (framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot),
-    "画风：" + styleLabel(project.author) + "。" + (project.author.look === "custom" ? project.author.artStyle : visualStyles[activeLook(project.author)].direction),
+    "画风：" + styleInstructions(project.author),
     ...[shot.blocking,shot.startPose,shot.lighting].filter(Boolean),
     ...roles.map((r,i) => "参考图" + (i+1) + "对应" + r.name + "，保留人物外观：" + (r.notes || "沿用参考图造型")),
     previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。保持视线方向、持物手和动作轴线，按当前镜头重新构图。" : ""
@@ -917,11 +939,7 @@ const styleNames = { ...Object.fromEntries(Object.entries(visualStyles).map(([ke
 
 function stylePicker() {
   const { look, artStyle } = project.author;
-  return '<div class="field"><span>画面风格</span><div class="style-options" aria-label="画面风格">' +
-    Object.entries(styleNames).map(([key, label]) =>
-      '<button type="button" data-look="' + key + '" aria-pressed="' + (look === key) + '">' +
-      (styleImages[key] ? artTag(styleImages[key][3]) : "") + '<span>' + label + '</span></button>'
-    ).join("") + '</div><small>风格会写入每镜提示词。下方图像和分镜里的图片均为构图示例。</small>' +
+  return '<div class="field"><label class="field">画面风格<select data-look-select>'+selectOptions(styleNames,look)+'</select></label>' + styleFields(project.author) +
     (look === "custom" ? '<label class="field">自定义画风<input data-author="artStyle" maxlength="70" value="' +
       escapeHtml(artStyle) + '" placeholder="例：淡彩水墨，暖色调"><small>自定义画风用于提示词，界面沿用国漫构图示例。</small></label>' : "") + '</div>';
 }
@@ -1038,7 +1056,7 @@ function renderEditor() {
     '<div class="row"><label class="field">时长（秒）<input type="number" min="0.1" step="0.1" data-field="seconds" value="' + shot.seconds + '"></label>' +
     '<label class="field">整集画风<select data-look-select>' + selectOptions(styleNames, project.author.look) + '</select></label></div>' +
     (project.author.look === "custom" ? '<label class="field">自定义画风<input data-author="artStyle" maxlength="70" value="' + escapeHtml(project.author.artStyle) + '" placeholder="例：淡彩水墨，暖色调"></label>' : "") +
-    '<p class="timing" id="timing"></p>' +
+    '<details class="writing-options"><summary>整集画风提示词</summary>'+styleFields(project.author)+'</details><p class="timing" id="timing"></p>' +
     '<button class="button primary" data-action="draw-shot"' + (drawingShots.has(shot) ? ' disabled' : '') + '>' +
     (drawingShots.has(shot) ? '正在绘制本镜…' : drawingErrors.has(shot) ? '重试本镜' : '按本镜脚本生成分镜图') + '</button>' +
     (drawingErrors.has(shot) ? '<p class="notice" role="status">' + escapeHtml(drawingErrors.get(shot)) + '</p>' : '') +
@@ -1830,7 +1848,7 @@ function handleAction(action) {
         "每镜写可直接配音的一句旁白，补充人物心理、信息差或时间变化；用可见的肢体动作表现情绪。用户提供的原对白逐字保留。旁白与对白总字数应适合本镜秒数。",
         "每镜独立写一行镜头，明确景别及运镜。每个镜头都用【分镜】起头。",
         "【分镜】镜头标题 [本镜时长秒]\n△ 具体动作和镜尾状态\n镜头：本镜景别 / 本镜运镜\n旁白：原创旁白\n角色名：台词（有对白时填写）"
-      ]).concat("每镜单列一行「场景：具体地点和时段」，根据本镜实际动作设计机位和运镜。").join("\n");
+      ]).concat("以下风格要求用于画面描述，保留原有故事与对白。"+styleInstructions(a),"每镜单列一行「场景：具体地点和时段」，根据本镜实际动作设计机位和运镜。").join("\n");
       void save();
       if (location.origin === "http://127.0.0.1:8793") {
         void onlineScreenplay(writingPrompt, action === "episode");
@@ -1969,6 +1987,10 @@ workspace.addEventListener("input", event => {
     project.author.purpose = input.value;
     setLook(production(project.author).look);
     return;
+  }
+  if (["positive","negative"].includes(input.dataset.styleTerm)) {
+    const edits = project.author.styleEdits ||= {};
+    (edits[project.author.look || "cinema"] ||= {})[input.dataset.styleTerm] = input.value;
   }
   if (input.dataset.author) project.author[input.dataset.author] = input.value;
   if (input.dataset.field && !["seconds", "framing"].includes(input.dataset.field)) {

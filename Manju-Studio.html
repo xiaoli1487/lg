@@ -558,6 +558,7 @@ function roleBindings(shot) {
     (roles.length ? '<small>勾选本镜出场角色；复制提示词到 TapNow 时，同时上传对应参考图或三视图。</small>' +
     roles.map(role => '<label><input type="checkbox" data-bind-role="' + role.id + '" ' +
       (shot.roleIds?.includes(role.id) ? "checked" : "") + '> ' + escapeHtml(role.name) + '</label>').join("") : '<small>在「写故事 → 角色参考库」导入人物图。</small>') +
+    '<label class="field">本镜场景名<input data-field="sceneName" maxlength="80" placeholder="例：办公室夜景" value="'+escapeHtml(shot.sceneName || "")+'"><small>同一地点和时段填同名，先做好该场景第一张图。后续镜头会沿用它的布景；转场请换名。</small></label>' +
     Object.entries({blocking:"站位与视线", startPose:"起始姿态 / 道具在哪只手", endPose:"结束姿态 / 接给下一镜", lighting:"光源与环境"}).map(([key,label]) =>
       '<label class="field">' + label + '<input data-field="' + key + '" value="' + escapeHtml(shot[key] || "") + '"></label>').join("") + '</div></details>';
 }
@@ -791,6 +792,14 @@ function shotVisual(shot, large = false) {
 function frameBrief(shot) {
   const index = project.shots.indexOf(shot);
   const roles = (project.roles || []).filter(role => shot.roleIds?.includes(role.id));
+  const scene = (shot.sceneName || "").trim();
+  const sameScene = other => scene && (other?.sceneName || "").trim() === scene;
+  const anchor = project.shots.slice(0,index).find(other => sameScene(other) && /^data:image\/(?:png|jpeg|webp);base64,/.test(other.image) && !demoImage(other.image) && !other.chosenExample);
+  const refs = roles.map(r=>r.sheet || r.image);
+  const limit = modelRoute("image").provider.startsWith("qwen") ? 3 : 16;
+  const useAnchor = anchor && refs.length < limit;
+  if (useAnchor) refs.push(anchor.image);
+  const previous = project.shots[index-1];
   const prompt = [
     "生成符合所选画风的独立分镜首帧。只呈现当前镜头的一个关键瞬间，主体留在中央9:16安全区域。无边框、字幕、气泡。",
     "用途：" + production(project.author).label + "。" + production(project.author).brief,
@@ -798,14 +807,17 @@ function frameBrief(shot) {
     "第" + (index+1) + "镜：" + shot.name,
     "本镜实际剧情与动作：" + (shot.direction || shot.line),
     "本镜台词（用于理解情绪，不在画中排字）：" + shot.line,
-    "场景：" + (project.author.location || "从当前镜头剧情推断"),
+    "场景：" + (scene || project.author.location || "从当前镜头剧情推断"),
+    scene && project.author.location ? "全片环境设定：" + project.author.location : "",
+    anchor ? "同场布景依据：" + [anchor.blocking,anchor.lighting].filter(Boolean).join("。") + "。延续固定家具、门窗方位和主光方向，按本镜动作改变构图。" : "",
+    useAnchor ? "参考图"+refs.length+"仅作场景依据。沿用空间布局、材质和光色。本镜出场人物以本镜剧本和角色参考为准。" : "",
     "构图：" + (framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot),
     "画风：" + styleLabel(project.author) + "。" + (project.author.look === "custom" ? project.author.artStyle : visualStyles[activeLook(project.author)].direction),
     ...[shot.blocking,shot.startPose,shot.lighting].filter(Boolean),
     ...roles.map((r,i) => "参考图" + (i+1) + "对应" + r.name + "，保留人物外观：" + (r.notes || "沿用参考图造型")),
-    index ? "前镜接点：" + (project.shots[index-1].endPose || project.shots[index-1].name) + "。保持方向连续，按当前镜头重新构图。" : ""
+    previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。保持视线方向、持物手和动作轴线，按当前镜头重新构图。" : ""
   ].filter(Boolean).join("\n");
-  return {prompt, roles};
+  return {prompt, roles, refs};
 }
 
 const drawingShots = new Set();
@@ -846,13 +858,14 @@ async function drawMissingShots() {
 }
 async function drawShot(shot, batch = false) {
   if (drawingShots.has(shot)) return;
-  const {prompt,roles} = frameBrief(shot);
+  const {prompt,roles,refs} = frameBrief(shot);
   if (location.origin !== "http://127.0.0.1:8793") {
     showText("绘制「" + shot.name + "」", prompt);
     const panel = document.createElement("div");
     panel.className = "role-handoff role-body";
     panel.innerHTML = '<p>复制上面的绘图要求，在 ChatGPT 生图。把结果选入下方，会放到当前这一镜。</p><a class="button secondary" href="https://chatgpt.com/" target="_blank" rel="noopener">打开 ChatGPT 生图</a>' +
       roles.map((r,i) => '<a download="参考图'+(i+1)+'.png" href="'+escapeHtml(r.sheet||r.image)+'">下载角色参考：'+escapeHtml(r.name)+'</a>').join("") +
+      (refs.length > roles.length ? '<a download="场景参考" href="'+escapeHtml(refs[refs.length-1])+'">下载场景参考图</a>' : '') +
       '<label class="field">将生成的图放回本镜<input type="file" accept="image/*"></label>';
     panel.querySelector("input").onchange = async event => {
       const file = event.target.files[0];
@@ -870,7 +883,7 @@ async function drawShot(shot, batch = false) {
   const previousVideo = shot.video;
   render();
   try {
-    const response = await fetch("/shot-image",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...modelRoute("image"),prompt,refs:roles.map(r=>r.sheet||r.image)})});
+    const response = await fetch("/shot-image",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...modelRoute("image"),prompt,refs})});
     const result = await response.json();
     if (!response.ok || !result.image) {
       const error = new Error(result.error || "未收到分镜图。");

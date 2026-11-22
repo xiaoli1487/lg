@@ -32,6 +32,22 @@ dialog{color:var(--text);background:#181822;border:1px solid #454057;border-radi
   
 <style>
 .ref-panel{padding:16px;display:grid;gap:12px}.ref-panel h2{margin:0}.ref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.ref-slot{display:grid;align-content:start;gap:7px;padding:12px;border:1px solid #454151;border-radius:10px;min-width:0}.ref-slot img{width:100%;height:84px;object-fit:contain;background:#14131a;border-radius:6px}.ref-slot input{max-width:100%;font:inherit;font-size:12px}.ref-slot small{line-height:1.5}.ref-slot button{justify-self:start}@media(max-width:580px){.ref-grid{grid-template-columns:1fr}}
+.card-header{background:linear-gradient(110deg,rgba(185,149,244,.065),transparent 70%);border-radius:14px 14px 0 0}
+.storyboard .card-header{flex-wrap:wrap}.storyboard .actions{flex-wrap:wrap}
+.shot[aria-pressed=true]{background:#30263c}.shot:focus-visible,.button:focus-visible,[data-step]:focus-visible{outline:2px solid #e3caff;outline-offset:3px}
+.ref-slot:focus-within{border-color:var(--accent)}.shot .shot-framing{font-weight:600}
+button[aria-busy=true]::before{content:"";display:inline-block;width:.85em;height:.85em;vertical-align:-.08em;margin-right:.5em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%}
+@media(prefers-reduced-motion:no-preference){
+  .button,.shot,[data-step],.ref-slot{transition:background-color .16s,border-color .16s,box-shadow .16s,transform .16s}
+  .button:not(:disabled):active,.shot:active{transform:scale(.98)}
+  .step-enter,dialog[open],.toast:not([hidden]){animation:studio-enter .19s ease-out both}
+  .shot-enter{animation:studio-frame .17s ease-out both}
+  button[aria-busy=true]::before{animation:studio-spin 1s linear infinite}
+  @keyframes studio-enter{from{opacity:.55;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes studio-frame{from{opacity:.55}to{opacity:1}}
+  @keyframes studio-spin{to{transform:rotate(360deg)}}
+}
+@media(max-width:600px){.storyboard .card-header,.ref-panel{padding:12px}.storyboard .actions{gap:6px}.storyboard .actions .button{white-space:normal}}
 </style></head>
 <body>
   <div class="shell">
@@ -1058,7 +1074,7 @@ function renderEditor() {
     '<label class="field">整集画风<select data-look-select>' + selectOptions(styleNames, project.author.look) + '</select></label></div>' +
     (project.author.look === "custom" ? '<label class="field">自定义画风<input data-author="artStyle" maxlength="70" value="' + escapeHtml(project.author.artStyle) + '" placeholder="例：淡彩水墨，暖色调"></label>' : "") +
     '<details class="writing-options"><summary>整集画风提示词</summary>'+styleFields(project.author)+'</details><p class="timing" id="timing"></p>' +
-    '<button class="button primary" data-action="draw-shot"' + (drawingShots.has(shot) ? ' disabled' : '') + '>' +
+    '<button class="button primary" data-action="draw-shot"' + (drawingShots.has(shot) ? ' disabled aria-busy="true"' : '') + '>' +
     (drawingShots.has(shot) ? '正在绘制本镜…' : drawingErrors.has(shot) ? '重试本镜' : '按本镜脚本生成分镜图') + '</button>' +
     (drawingErrors.has(shot) ? '<p class="notice" role="status">' + escapeHtml(drawingErrors.get(shot)) + '</p>' : '') +
     '<div class="video-tools"><div class="field"><span>TapNow 视频</span><small>复制本镜提示词，在 TapNow 生成后，把视频导回这里。</small></div>' +
@@ -1118,6 +1134,8 @@ function render() {
   $("#breadcrumb").textContent = "我的漫剧 / " + (project.title || "未命名漫剧");
   $("#heading").textContent = labels[step];
   $("#next").textContent = nextSteps[step];
+  $("#next").removeAttribute("aria-busy");
+  delete $("#next").dataset.readyLabel;
   $("#next").disabled = step === "finish" && !videoType();
   $("#preview").hidden = step === "story";
   for (const button of $$("[data-step]")) {
@@ -1127,12 +1145,15 @@ function render() {
   if (step === "story") renderStory();
   if (step === "edit") renderEditor();
   if (step === "finish") renderFinish();
+  if (step === "story" && writingOnline) updateWritingButtons(true);
 }
 
 function go(target) {
   if (exportJob || !ready) return;
+  const changed = step !== target;
   step = target;
   render();
+  if (changed) workspace.firstElementChild?.classList.add("step-enter");
   void save();
 }
 
@@ -1206,6 +1227,21 @@ function writeDraft(withBoard) {
 }
 
 let writingOnline = false;
+function updateWritingButtons(busy) {
+  if (step !== "story") return;
+  for (const button of $$('#next,[data-action="ai-story"],[data-action="episode"]')) {
+    if (busy && !button.hasAttribute("aria-busy")) button.dataset.readyLabel = button.textContent;
+    button.disabled = busy;
+    if (busy) {
+      button.setAttribute("aria-busy","true");
+      button.textContent = "正在创作剧本…";
+    } else {
+      button.removeAttribute("aria-busy");
+      if (button.dataset.readyLabel) button.textContent = button.dataset.readyLabel;
+      delete button.dataset.readyLabel;
+    }
+  }
+}
 function draftTrack(author) {
   const key = JSON.stringify([author.purpose || "story", author.idea.trim()]);
   const tracks = Array.isArray(project.draftTracks) ? project.draftTracks : [];
@@ -1246,6 +1282,7 @@ function similarActions(left,right) {
 async function onlineScreenplay(prompt, withImages = false) {
   if (writingOnline || !window.confirm("将本次点子、角色名和场景发给选定的文本模型写剧本？此操作按 API 账户计费。")) return;
   writingOnline = true;
+  updateWritingButtons(true);
   const before = project.screenplay;
   const idea = project.author.idea;
   const owner = project;
@@ -1269,7 +1306,7 @@ async function onlineScreenplay(prompt, withImages = false) {
       if (withImages) await drawMissingShots();
     }
   } catch (error) { notify(error.message); }
-  finally { writingOnline = false; }
+  finally { writingOnline = false; updateWritingButtons(false); }
 }
 
 function parseScreenplay(text) {
@@ -2019,8 +2056,10 @@ workspace.addEventListener("click", event => {
   if (button.dataset.action) handleAction(button.dataset.action);
   if (button.dataset.look) setLook(button.dataset.look);
   if (button.dataset.shot !== undefined) {
+    const changed = selected !== Number(button.dataset.shot);
     selected = Number(button.dataset.shot);
     refreshShot();
+    if (changed) $(".stage")?.classList.add("shot-enter");
   }
   if (button.dataset.image !== undefined) {
     const slot = Number(button.dataset.image);

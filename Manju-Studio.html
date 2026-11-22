@@ -1205,18 +1205,62 @@ function writeDraft(withBoard) {
 }
 
 let writingOnline = false;
+function draftTrack(author) {
+  const key = JSON.stringify([author.purpose || "story", author.idea.trim()]);
+  const tracks = Array.isArray(project.draftTracks) ? project.draftTracks : [];
+  let track = tracks.find(item=>item?.key===key && Array.isArray(item.samples));
+  if (!track) track = {key,attempt:0,samples:[]};
+  project.draftTracks = [...tracks.filter(item=>item!==track).slice(-11),track];
+  return track;
+}
+function draftApproach(author,track) {
+  const choices = factual(author)
+    ? ["跟随一次完整服务或工序。","从可核实的结果回看关键一步。","从受众要解决的具体问题切入。","用同一工作对象串起不同岗位。","从最容易忽略的一道细节展开。"]
+    : ["从人物当下要做的选择展开。","从一个可见后果切入，再揭示成因。","从配角目睹的异常细节切入。","让两个人对同一件事的理解产生冲突。","先呈现一个未完成的小目标，再揭示真正代价。"];
+  return ["本版叙事方向："+choices[track.attempt % choices.length],
+    "先在内部构思三个符合点子的展开，再选与本点子前稿差异最大的一种。改变开场事件、信息揭示顺序、人物应对和收尾画面；用户规定的事实、结局和原话优先。",
+    ...track.samples.slice(-3).map((sample,i)=>"同一点子已采用的动作摘要"+(i+1)+"（避重用）："+sample.slice(0,420))
+  ].join("\n");
+}
+function actionSummary(shots) {
+  const actions = shots.map(shot=>shot.direction.trim().slice(0,100)).filter(Boolean);
+  return (actions.length<=5 ? actions : [actions[0],actions[1],actions[Math.floor(actions.length/2)],...actions.slice(-2)]).join(" / ");
+}
+function similarActions(left,right) {
+  const pairs = text=>{
+    const str=text.replace(/[\s\p{P}]/gu,"");
+    return new Set(Array.from({length:Math.max(0,str.length-1)},(_,i)=>str.slice(i,i+2)));
+  };
+  if (left===right) return true;
+  const a=pairs(left), b=pairs(right);
+  const overlap=[...a].filter(pair=>b.has(pair)).length;
+  return 2*overlap/Math.max(1,a.size+b.size) >= .86;
+}
 async function onlineScreenplay(prompt, withImages = false) {
   if (writingOnline || !window.confirm("将本次点子、角色名和场景发给选定的文本模型写剧本？此操作按 API 账户计费。")) return;
   writingOnline = true;
   const before = project.screenplay;
   const idea = project.author.idea;
+  const owner = project;
+  const track = draftTrack(project.author);
+  prompt += "\n"+draftApproach(project.author,track);
+  track.attempt++;
+  void save();
   notify("正在创作剧本，请稍候。");
   try {
     const response = await fetch("/write-story", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({...modelRoute("text"),prompt})});
     const data = await response.json();
     if (!response.ok || !data.screenplay) throw new Error(data.error || "剧本生成失败");
-    if (project.screenplay !== before || project.author.idea !== idea) { showText("生成的剧本", data.screenplay); return; }
-    if (acceptCreativeDraft(data.screenplay) && withImages) await drawMissingShots();
+    if (project!==owner || project.screenplay !== before || project.author.idea !== idea) { showText("生成的剧本", data.screenplay); return; }
+    const sample = actionSummary(parseScreenplay(data.screenplay));
+    if (sample && track.samples.some(old=>similarActions(sample,old))) {
+      notify("本次返回的分镜动作与前稿高度重复，已保留当前时间线。再次生成会换一个叙事方向。"); return;
+    }
+    if (acceptCreativeDraft(data.screenplay)) {
+      track.samples = [...track.samples.slice(-4),sample];
+      void save();
+      if (withImages) await drawMissingShots();
+    }
   } catch (error) { notify(error.message); }
   finally { writingOnline = false; }
 }

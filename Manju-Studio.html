@@ -368,9 +368,10 @@ function timelineScript(title, shots, author) {
 
 function generationPrompt(project, index) {
   const shot = project.shots[index];
-  const previous = project.shots[index - 1];
+  const prior = project.shots[index - 1];
+  const previous = prior && (prior.sceneName || "").trim() === (shot.sceneName || "").trim() ? prior : null;
   const names = castNames(project.author.cast);
-  const speaker = shot.line.match(/^([^：:\n]{1,10})[：:]/)?.[1];
+  const speaker = shot.line.split("\n").map(line=>line.match(/^([^：:]{1,10})[：:]/)?.[1]).find(name=>name && name!=="旁白");
   const cast = names.length ? "角色表：" + names.join("、") + "。沿用参考图里的五官、发型和服饰。只拍本镜需要出场的人，多人同框时保留左右位置。" :
     "人物：沿用首帧图中的人物、穿着、左右站位和朝向。";
   const direction = shot.direction?.trim() || "按本镜剧情安排一个可见的小动作，表情和视线有明确变化。";
@@ -389,14 +390,13 @@ function generationPrompt(project, index) {
     "分镜 " + (index + 1) + "：" + (shot.name || "未命名分镜") + "。以上传的本镜首帧为准。",
     bound.length ? "本镜出场：" + bound.map(role => role.name).join("、") + "。将以下参考图作为人物身份依据。" : cast,
     ...bound.map((role, i) => "人物参考" + (i + 1) + "：" + role.name + "，使用" + (role.sheet ? "该角色正面、侧面、背面三视图" : "该角色原始参考图") + "。锁定" + (role.notes?.trim() || "脸型、发际线、发色、服装轮廓、鞋型与饰物所在身体侧") + "。"),
-    project.author.location.trim() ? "场景：" + project.author.location.trim() + "。道具和光源位置保持一致。" : "保持首帧的场景布局、光线方向与主要道具位置。",
+    "场景：" + (shot.sceneName || project.author.location || "沿用首帧空间") + "。道具和光源位置保持一致。",
     "制作用途：" + production(project.author).label + "。" + production(project.author).brief,
-    "画面动作：" + direction,
     "场面调度：" + (shot.blocking?.trim() || "以首帧的前后遮挡和左右站位为基准；机位留在对话轴线同侧。看向画外的方向与对方上镜的位置对应。"),
     "光线与空间：" + (shot.lighting?.trim() || "以首帧最亮的一侧作为主光方向，切近景仍保留对应面部阴影和背景地标。人物清晰，背景运动幅度低于主动作。"),
     "动作节拍：0–" + firstBeat + "秒，" + start + " " + firstBeat + "–" + finalBeat + "秒，" + direction + " 最后至" + shot.seconds + "秒，" + end,
     "景别与构图：" + framing + "。" + focus + (speaker && shot.framing === "close" ? "镜头优先捕捉" + speaker + "的表情。" : ""),
-    "运镜：" + camera + "。留出自然反应时间。",
+    "运镜：" + (shot.cameraOverride || !shot.focus?.trim() ? camera : "按本镜构图说明执行") + "。一个连续镜头，让观众看清动作结果。",
     "衔接：" + (previous ? "承接前镜「" + (previous.name || "未命名分镜") +
       "」结束时的人物位置、视线和道具状态。" : "第一秒直接进入本镜动作，保持场景方向清楚。") +
       (shot.cut?.trim() || shotPlans.find(plan => plan.framing === shot.framing)?.cut || ""),
@@ -797,7 +797,7 @@ function frameBrief(shot) {
     "用途：" + production(project.author).label + "。" + production(project.author).brief,
     "剧名：" + project.title + "。故事背景：" + (project.author.idea || project.title),
     "第" + (index+1) + "镜：" + shot.name,
-    "本镜实际剧情与动作：" + (shot.direction || shot.line),
+    "首帧定格：" + (shot.startPose || shot.direction || shot.line) + "。只画动作起始的一刻；连续动作留给视频。",
     "本镜台词（用于理解情绪，不在画中排字）：" + shot.line,
     "场景：" + (scene || project.author.location || "从当前镜头剧情推断"),
     scene && project.author.location ? "全片环境设定：" + project.author.location : "",
@@ -806,7 +806,7 @@ function frameBrief(shot) {
     visualIndex ? "参考图"+visualIndex+"用于本镜构图、姿态或道具细节。人物身份沿用角色图，地点沿用场景设定。" : "",
     "构图：" + (framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot),
     "画风：" + styleInstructions(project.author),
-    ...[shot.blocking,shot.startPose,shot.lighting].filter(Boolean),
+    ...[shot.blocking,shot.lighting].filter(Boolean),
     ...roles.map((r,i) => "参考图" + (i+1) + "对应" + r.name + "，保留人物外观：" + (r.notes || "沿用参考图造型")),
     previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。保持视线方向、持物手和动作轴线，按当前镜头重新构图。" : ""
   ].filter(Boolean).join("\n");
@@ -1230,13 +1230,18 @@ function parseScreenplay(text) {
     const direction = lines.filter(line => line.startsWith("△")).map(line=>line.slice(1).trim()).join("\n");
     const camera = (lines.find(line => /^镜头[：:]/.test(line)) || "").replace(/^镜头[：:]\s*/, "");
     const sceneName = (lines.find(line => /^场景[：:]/.test(line)) || "").replace(/^场景[：:]\s*/, "");
+    const staging = {};
+    for (const [label,key] of [["首帧","startPose"],["落点","endPose"],["站位","blocking"],["光线","lighting"]]) {
+      const value = lines.find(line => line.startsWith(label+"：") || line.startsWith(label+":"));
+      if (value) staging[key] = value.slice(label.length+1).trim();
+    }
     const framing = Object.keys(framingOptions).find(key => camera.includes(framingOptions[key])) ||
       [["shoulder", /过肩/], ["detail", /局部|手部特写|物件特写/], ["rear", /背面远景|背影远景/], ["close", /近景|特写/], ["side", /侧面中景|跟拍/], ["wide", /全景|远景/]].find(([,rule]) => rule.test(camera + direction))?.[0];
     const motion = Object.keys(movementOptions).find(key => camera.includes(movementOptions[key].label));
-    const dialogue = lines.filter(line => !line.startsWith("△") && !/^(场景|镜头)[：:]/.test(line)).join("\n").trim();
+    const dialogue = lines.filter(line => !line.startsWith("△") && !/^(场景|镜头|首帧|落点|站位|光线)[：:]/.test(line)).join("\n").trim();
     return {
       name: (duration ? heading.slice(0, duration.index) : heading).trim(), line: dialogue, direction,
-      framing, motion, sceneName, focus:camera,
+      framing, motion, sceneName, focus:camera, ...staging,
       seconds: Math.max(1, Math.min(60, duration ? Number(duration[1]) : Math.max(5, estimate(dialogue)))),
       audio: "", audioName: ""
     };
@@ -1848,7 +1853,11 @@ function handleAction(action) {
         "每镜写可直接配音的一句旁白，补充人物心理、信息差或时间变化；用可见的肢体动作表现情绪。用户提供的原对白逐字保留。旁白与对白总字数应适合本镜秒数。",
         "每镜独立写一行镜头，明确景别及运镜。每个镜头都用【分镜】起头。",
         "【分镜】镜头标题 [本镜时长秒]\n△ 具体动作和镜尾状态\n镜头：本镜景别 / 本镜运镜\n旁白：原创旁白\n角色名：台词（有对白时填写）"
-      ]).concat("以下风格要求用于画面描述，保留原有故事与对白。"+styleInstructions(a),"每镜单列一行「场景：具体地点和时段」，根据本镜实际动作设计机位和运镜。").join("\n");
+      ]).concat(
+        "以下风格要求用于画面描述，保留原有故事与对白。"+styleInstructions(a),
+        "每镜单列六项。场景：地点与时段，同一场戏保持同名。首帧：用一句能画成照片的话交代主体、手中物件和动作起点。站位：本镜可见人物相对一个固定地标的位置与视线。光线：现场光源从哪侧照来，照亮什么。镜头：景别、机位和一种主运镜，写出移动后露出的剧情信息；固定镜头写清焦点。落点：动作结束时物件与人物的可见状态。",
+        "△ 行写在镜长内能完成的一次主动作和可见结果。多人对白按发言顺序安排视线与倾听反应；工序镜头拍清操作前后同一工件的变化；办事流程交代谁递交、谁接收及下一步。仅采用与本镜素材有关的调度，避免添加无关道具或动作。"
+      ).join("\n");
       void save();
       if (location.origin === "http://127.0.0.1:8793") {
         void onlineScreenplay(writingPrompt, action === "episode");
@@ -1996,6 +2005,7 @@ workspace.addEventListener("input", event => {
   if (input.dataset.field && !["seconds", "framing"].includes(input.dataset.field)) {
     const shot = project.shots[selected];
     shot[input.dataset.field] = input.value;
+    if (input.dataset.field === "motion") shot.cameraOverride = true;
     $("#stage-caption").textContent = shot.line;
     const name = shot.name || "未命名分镜";
     $("#stage-name").textContent = name;

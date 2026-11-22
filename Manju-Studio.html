@@ -264,7 +264,7 @@ function buildDraft(settings, title) {
   const template = storyTemplates[settings.genre] ?? storyTemplates.mystery;
   const names = castNames(settings.cast);
   if (!names.length) names.push("主角");
-  const location = settings.location.trim() || (factual(settings) ? "按素材中的实际地点取景" : template.location);
+  const location = settings.location.trim() || "依照各镜原文中的地点";
   const premise = settings.idea.trim().replace(/\s+/g, " ").replace(/[。！？!?]+$/, "");
   if (!premise) throw new Error("先写一句故事点子。");
   const seconds = targetTicks(settings.length)/10;
@@ -281,49 +281,15 @@ function buildDraft(settings, title) {
     const reaction = /发现|认出|意识到|原来|愣|笑|哭/.test(event);
     const framing = sound ? "close" : move ? "side" : detail ? "detail" : reaction ? "close" : start ? "shoulder" : "wide";
     const dialogue = event.match(/[“「]([^”」]+)[”」]/)?.[1];
-    const copy = writeShotCopy(event, settings, shots.length);
     shots.push({
       name:Array.from(event).slice(0,16).join(""), event,
-      direction:"本镜呈现「" + event + "」。" + copy.action,
-      line:dialogue ? copy.narration + "\n" + speaker + "：" + dialogue : copy.narration,
+      direction:event,
+      line:dialogue ? speaker + "：" + dialogue : "旁白：" + event,
       framing, motion:move ? "track" : detail ? "push" : "still", audio:"", audioName:""
     });
     start = end;
   }
   if (!shots.length) throw new Error("请写下故事里发生的一件事。");
-  const expanded = [];
-  for (const shot of shots) {
-    expanded.push(shot);
-    if (factual(settings)) continue;
-    const text = shot.event;
-    let continuation;
-    if (/车票|船票|机票/.test(text)) {
-      const ticket = text.match(/车票|船票|机票/)[0];
-      continuation = /明天|未来/.test(text)
-        ? ["核对日期", "把" + ticket + "上的日期与手机锁屏日期并排，手指在相差一天的数字间移过。", "今天才几号？这票怎么能用？", "detail"]
-        : ["寻找失主", "拿起" + ticket + "循着刚离开的乘客望去，把票举到胸前。", "谁的" + ticket + "掉了？", "shoulder"];
-    } else if (/照片|相册/.test(text)) {
-      continuation = ["翻看背面", "指尖轻轻翻过照片，拇指停在背面的一行铅笔字上。", "这行字……我认得。", "detail"];
-    } else if (/声音|广播|听见|听到/.test(text)) {
-      continuation = ["循声辨认", "声音停下后，人物仍面朝声源，短暂沉默中等待第二声。", /名字|叫我/.test(text) ? "刚刚叫的，是我？" : "再听一下，是从哪边来的？", "close"];
-    } else if (/钥匙|锁住|锁上/.test(text)) {
-      continuation = ["试锁", "手腕只转了半圈便停住，人物把耳朵凑近锁芯。", "里面好像卡住了。", "detail"];
-    } else if (/跑|追|逃/.test(text)) {
-      continuation = ["追到转角", "人物追到转角收住脚步，扶着墙朝前看，喘息盖过远处的脚步声。", "刚才还在这儿……", "side"];
-    } else if (/信封|信件|来信/.test(text)) {
-      continuation = ["拆信", "沿信封折痕拆开封口，视线停在署名处。", "怎么会是这封信？", "detail"];
-    }
-    if (continuation && expanded.length < maxShots - (shots.length - shots.indexOf(shot) - 1)) {
-      const [name,direction,line,framing] = continuation;
-      expanded.push({name,direction,line:speaker + "：" + line,framing,motion:"still",audio:"",audioName:""});
-    }
-  }
-  shots.splice(0, shots.length, ...expanded);
-  for (let i = 1; i < shots.length; i++) {
-    if (shots[i].framing === shots[i - 1].framing) {
-      shots[i].framing = shots[i].framing === "detail" ? "close" : "shoulder";
-    }
-  }
   distributeTime(shots, seconds);
   const draftTitle = title && title !== "雨夜末班车" ? title : Array.from(premise).slice(0, 20).join("");
   const screenplay = [
@@ -640,7 +606,7 @@ const sampleLines = [
 ];
 const starter = () => ({
   title: "雨夜末班车",
-  story: sampleLines.map(line => line[1]).join("\n"),
+  story: "",
   author: authorSettings(),
   screenplay: "",
   shots: sampleLines.map(([name, line, seconds, motion], index) =>
@@ -779,7 +745,7 @@ function demoFor(framing, slot = 0) {
 }
 
 function needsArtwork(shot) {
-  return !shot.video && !shot.chosenExample && demoImage(shot.image) &&
+  return !shot.video && !shot.chosenExample && (!shot.image || demoImage(shot.image)) &&
     !sampleLines.some(([name,line], i) => shot.name === name && shot.line === line && (shot.image === assets[i] || shot.image === "frame-" + (i+1) + ".jpg"));
 }
 
@@ -913,7 +879,7 @@ function planBoard(shots, preserve = false) {
     const framing = preserve && framingOptions[shot.framing] ? shot.framing : plan.framing;
     return {
       ...shot, framing, motion: preserve && movementOptions[shot.motion] ? shot.motion : plan.motion,
-      image: !shot.image || demoImage(shot.image) ? demoFor(framing, plan.slot) : shot.image
+      image: shot.image || ""
     };
   });
 }
@@ -1189,6 +1155,7 @@ function writeDraft(withBoard) {
   if (!project.title || project.title === "雨夜末班车" || project.title === project.lastAutoTitle) project.lastAutoTitle = draft.title;
   project.title = draft.title;
   project.screenplay = draft.screenplay;
+  project.story = draft.shots.map(shot => shot.line).join("\n");
   if (withBoard) setBoard(draft.shots, true);
   if (step === "story") {
     render();
@@ -1221,14 +1188,15 @@ function parseScreenplay(text) {
     const [heading, ...lines] = block.split(/\r?\n/).map(line => line.trim());
     const duration = heading.match(/\s*[\[（(【](\d+(?:\.\d+)?)\s*秒[\]）)】]\s*$/);
     const direction = lines.filter(line => line.startsWith("△")).map(line=>line.slice(1).trim()).join("\n");
-    const camera = lines.find(line => line.startsWith("镜头：")) || "";
+    const camera = (lines.find(line => /^镜头[：:]/.test(line)) || "").replace(/^镜头[：:]\s*/, "");
+    const sceneName = (lines.find(line => /^场景[：:]/.test(line)) || "").replace(/^场景[：:]\s*/, "");
     const framing = Object.keys(framingOptions).find(key => camera.includes(framingOptions[key])) ||
-      [["shoulder", /过肩/], ["detail", /局部|手部特写|物件特写/], ["rear", /背面远景|背影远景/], ["close", /近景|特写/], ["side", /侧面中景|跟拍/], ["wide", /全景|远景/]].find(([,rule]) => rule.test(direction))?.[0];
+      [["shoulder", /过肩/], ["detail", /局部|手部特写|物件特写/], ["rear", /背面远景|背影远景/], ["close", /近景|特写/], ["side", /侧面中景|跟拍/], ["wide", /全景|远景/]].find(([,rule]) => rule.test(camera + direction))?.[0];
     const motion = Object.keys(movementOptions).find(key => camera.includes(movementOptions[key].label));
-    const dialogue = lines.filter(line => !line.startsWith("△") && !line.startsWith("镜头：")).join("\n").trim();
+    const dialogue = lines.filter(line => !line.startsWith("△") && !/^(场景|镜头)[：:]/.test(line)).join("\n").trim();
     return {
       name: (duration ? heading.slice(0, duration.index) : heading).trim(), line: dialogue, direction,
-      framing, motion,
+      framing, motion, sceneName, focus:camera,
       seconds: Math.max(1, Math.min(60, duration ? Number(duration[1]) : Math.max(5, estimate(dialogue)))),
       audio: "", audioName: ""
     };
@@ -1244,8 +1212,9 @@ function acceptCreativeDraft(text) {
   if (!canReplaceBoard()) return false;
   try { distributeTime(shots, project.author.length); } catch (error) { notify(error.message); return false; }
   const title = text.match(/《([^》\n]+)》/)?.[1];
-  if (title) project.title = title;
+  if (title) project.lastAutoTitle = project.title = title;
   project.screenplay = text.trim();
+  project.story = shots.map(shot => shot.line).join("\n");
   setBoard(shots, true);
   return true;
 }
@@ -1759,7 +1728,7 @@ async function restoreProject(file) {
       !restored.author || typeof restored.title !== "string") throw new Error("项目格式错误");
   const safeImage = value => typeof value === "string" && (demoImage(value) || /^data:image\/(?:jpeg|webp|png);base64,/.test(value));
   for (const shot of restored.shots) {
-    if (!safeImage(shot.image) || !Number.isFinite(shot.seconds) || shot.seconds <= 0 || typeof shot.line !== "string" ||
+    if ((shot.image !== "" && !safeImage(shot.image)) || !Number.isFinite(shot.seconds) || shot.seconds <= 0 || typeof shot.line !== "string" ||
         (shot.videoPoster && !safeImage(shot.videoPoster))) throw new Error("分镜数据错误");
     if (shot.video) {
       if (!/^data:(?:video\/[\w.+-]+|application\/octet-stream)?;base64,/.test(shot.video)) throw new Error("视频数据错误");
@@ -1819,8 +1788,6 @@ function handleAction(action) {
       if (!project.author.idea.trim()) { notify("先填入故事点子。"); return; }
       const a = project.author;
       try { targetTicks(a.length); } catch (error) { notify(error.message); return; }
-      const takes = ["跟随主角的选择，让结尾兑现开场埋下的细节。","从事件造成的后果开场，通过一个具体发现揭示原因。","从见证者看到的细节开场，把真正的动机留到后半段。"];
-      const pass = project.writingPass || 0;
       const writingPrompt = (factual(a) ? [
         "创作中文" + production(a).label + "。素材：" + a.idea,
         production(a).brief, "画风：" + styleLabel(a) + "。时长：" + a.length + "秒。按动作和自然语速分配镜长，总和必须准确。",
@@ -1831,15 +1798,14 @@ function handleAction(action) {
         production(a).brief,
         "请根据下面的故事点子创作独立的中文漫剧。保留用户写明的事件和结局，补齐具体因果、人物选择、阻力和结果。避免通用对白。",
         "故事点子：" + a.idea, "类型：" + storyTemplates[a.genre].label + "，画风：" + styleLabel(a) + "，总时长：" + a.length + "秒。",
-        "本次创作方向：" + takes[pass % takes.length],
-        project.screenplay?.trim() ? "以下是上一稿节选，仅用于避重。重新设计发现线索的方式、人物选择、镜头切入点及结尾动作，保留用户规定的事实和对白。\n" + project.screenplay.slice(0,1800) : "用《剧名》开头。",
+        "从这条点子独有的人物、动作或物件切入；让前一镜的具体结果引发下一镜。",
+        "用《剧名》开头。地点、人物目标、转折、结局和每一镜可见动作都要从本次点子推导。",
         "角色：" + (a.cast || "按剧情取名") + "。场景：" + (a.location || "根据点子选择") + "。",
         "按剧情选择镜数。每镜用下面三行格式，镜头标题里的秒数相加等于总时长。△ 后写具体景别、谁在什么位置、可见动作、光线和镜尾接点。对白自然，结尾回应开头的具体问题。",
         "每镜写可直接配音的一句旁白，补充人物心理、信息差或时间变化；用可见的肢体动作表现情绪。用户提供的原对白逐字保留。旁白与对白总字数应适合本镜秒数。",
         "每镜独立写一行镜头，明确景别及运镜。每个镜头都用【分镜】起头。",
-        "【分镜】镜头标题 [5秒]\n△ 具体动作和镜尾状态\n镜头：局部特写 · 手或道具 / 慢慢推近\n旁白：原创旁白\n角色名：台词（有对白时填写）"
-      ]).join("\n");
-      project.writingPass = pass + 1;
+        "【分镜】镜头标题 [本镜时长秒]\n△ 具体动作和镜尾状态\n镜头：本镜景别 / 本镜运镜\n旁白：原创旁白\n角色名：台词（有对白时填写）"
+      ]).concat("每镜单列一行「场景：具体地点和时段」，根据本镜实际动作设计机位和运镜。").join("\n");
       void save();
       if (location.origin === "http://127.0.0.1:8793") {
         void onlineScreenplay(writingPrompt, action === "episode");

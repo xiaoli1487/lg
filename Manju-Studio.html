@@ -944,12 +944,12 @@ function modelRoute(kind) {
 function modelSettings() {
   if (!hasLocalService()) return "";
   const a = project.author;
-  const images = {openai:"OpenAI",qwen:"千问"};
+  const images = {openai:"OpenAI",qwen:"千问（阿里云百炼）",qwenpay:"千问AI平台（按量付费）"};
   const writers = {...images,deepseek:"DeepSeek"};
   return '<details class="writing-options"><summary>模型设置</summary><div class="writing-options-fields">' +
     '<label class="field">写剧本<select data-author="textProvider">'+selectOptions(writers,modelRoute("text").provider)+'</select></label>' +
     '<label class="field">分镜图和三视图<select data-author="imageProvider">'+selectOptions(images,modelRoute("image").provider)+'</select></label>' +
-    '<label class="field">百炼业务空间 ID（用千问时填写）<input data-author="qwenWorkspace" value="'+escapeHtml(a.qwenWorkspace || "")+'"></label>' +
+    '<label class="field">百炼业务空间 ID（仅阿里云百炼填写）<input data-author="qwenWorkspace" value="'+escapeHtml(a.qwenWorkspace || "")+'"></label>' +
     '<label class="field">百炼地域<select data-author="qwenRegion">'+selectOptions({"cn-beijing":"北京","ap-southeast-1":"新加坡","us-east-1":"美国","cn-hongkong":"中国香港","eu-central-1":"德国","ap-northeast-1":"日本"},modelRoute("text").region)+'</select></label>' +
     '<label class="field">要配置密钥的平台<select id="key-provider">'+selectOptions(writers,modelRoute("text").provider)+'</select></label>' +
     '<label class="field">API Key（仅当前标签页有效，刷新后重新填写）<input id="provider-key" type="password" autocomplete="off"></label>' +

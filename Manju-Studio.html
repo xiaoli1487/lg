@@ -30,7 +30,9 @@ dialog{color:var(--text);background:#181822;border:1px solid #454057;border-radi
   
   
   
-</head>
+<style>
+.ref-panel{padding:16px;display:grid;gap:12px}.ref-panel h2{margin:0}.ref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.ref-slot{display:grid;align-content:start;gap:7px;padding:12px;border:1px solid #454151;border-radius:10px;min-width:0}.ref-slot img{width:100%;height:84px;object-fit:contain;background:#14131a;border-radius:6px}.ref-slot input{max-width:100%;font:inherit;font-size:12px}.ref-slot small{line-height:1.5}.ref-slot button{justify-self:start}@media(max-width:580px){.ref-grid{grid-template-columns:1fr}}
+</style></head>
 <body>
   <div class="shell">
     <aside class="sidebar">
@@ -763,8 +765,10 @@ function frameBrief(shot) {
   const anchor = project.shots.slice(0,index).find(other => sameScene(other) && /^data:image\/(?:png|jpeg|webp);base64,/.test(other.image) && !demoImage(other.image) && !other.chosenExample);
   const refs = roles.map(r=>r.sheet || r.image);
   const limit = modelRoute("image").provider.startsWith("qwen") ? 3 : 16;
-  const useAnchor = anchor && refs.length < limit;
-  if (useAnchor) refs.push(anchor.image);
+  const inherited = scene && project.shots.slice(0,index).reverse().find(other => sameScene(other) && other.sceneRef);
+  const sceneImage = shot.sceneRef || inherited?.sceneRef || anchor?.image;
+  const sceneIndex = sceneImage && (shot.sceneRef || inherited || refs.length + Number(Boolean(shot.visualRef)) < limit) ? refs.push(sceneImage) : 0;
+  const visualIndex = shot.visualRef ? refs.push(shot.visualRef) : 0;
   const previous = project.shots[index-1];
   const prompt = [
     "生成符合所选画风的独立分镜首帧。只呈现当前镜头的一个关键瞬间，主体留在中央9:16安全区域。无边框、字幕、气泡。",
@@ -776,14 +780,15 @@ function frameBrief(shot) {
     "场景：" + (scene || project.author.location || "从当前镜头剧情推断"),
     scene && project.author.location ? "全片环境设定：" + project.author.location : "",
     anchor ? "同场布景依据：" + [anchor.blocking,anchor.lighting].filter(Boolean).join("。") + "。延续固定家具、门窗方位和主光方向，按本镜动作改变构图。" : "",
-    useAnchor ? "参考图"+refs.length+"仅作场景依据。沿用空间布局、材质和光色。本镜出场人物以本镜剧本和角色参考为准。" : "",
+    sceneIndex ? "参考图"+sceneIndex+"仅作场景依据。沿用空间布局、材质和光色。本镜出场人物以本镜剧本和角色参考为准。" : "",
+    visualIndex ? "参考图"+visualIndex+"用于本镜构图、姿态或道具细节。人物身份沿用角色图，地点沿用场景设定。" : "",
     "构图：" + (framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot),
     "画风：" + styleLabel(project.author) + "。" + (project.author.look === "custom" ? project.author.artStyle : visualStyles[activeLook(project.author)].direction),
     ...[shot.blocking,shot.startPose,shot.lighting].filter(Boolean),
     ...roles.map((r,i) => "参考图" + (i+1) + "对应" + r.name + "，保留人物外观：" + (r.notes || "沿用参考图造型")),
     previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。保持视线方向、持物手和动作轴线，按当前镜头重新构图。" : ""
   ].filter(Boolean).join("\n");
-  return {prompt, roles, refs};
+  return {prompt, roles, refs, sceneIndex, visualIndex, limit};
 }
 
 const drawingShots = new Set();
@@ -824,14 +829,19 @@ async function drawMissingShots() {
 }
 async function drawShot(shot, batch = false) {
   if (drawingShots.has(shot)) return;
-  const {prompt,roles,refs} = frameBrief(shot);
+  const {prompt,roles,refs,sceneIndex,visualIndex,limit} = frameBrief(shot);
+  if (hasLocalService() && refs.length > limit) {
+    const message = "本镜选了 "+refs.length+" 张参考图，当前平台最多支持 "+limit+" 张。请减少绑定角色或参考图后重试。";
+    drawingErrors.set(shot,message); render(); if (!batch) notify(message); return "blocked";
+  }
   if (location.origin !== "http://127.0.0.1:8793") {
     showText("绘制「" + shot.name + "」", prompt);
     const panel = document.createElement("div");
     panel.className = "role-handoff role-body";
     panel.innerHTML = '<p>复制上面的绘图要求，在 ChatGPT 生图。把结果选入下方，会放到当前这一镜。</p><a class="button secondary" href="https://chatgpt.com/" target="_blank" rel="noopener">打开 ChatGPT 生图</a>' +
       roles.map((r,i) => '<a download="参考图'+(i+1)+'.png" href="'+escapeHtml(r.sheet||r.image)+'">下载角色参考：'+escapeHtml(r.name)+'</a>').join("") +
-      (refs.length > roles.length ? '<a download="场景参考" href="'+escapeHtml(refs[refs.length-1])+'">下载场景参考图</a>' : '') +
+      (sceneIndex ? '<a download="场景参考" href="'+escapeHtml(refs[sceneIndex-1])+'">下载场景参考图</a>' : '') +
+      (visualIndex ? '<a download="本镜参考" href="'+escapeHtml(refs[visualIndex-1])+'">下载本镜参考图</a>' : '') +
       '<label class="field">将生成的图放回本镜<input type="file" accept="image/*"></label>';
     panel.querySelector("input").onchange = async event => {
       const file = event.target.files[0];
@@ -856,7 +866,8 @@ async function drawShot(shot, batch = false) {
       error.blocked = result.blocked === true;
       throw error;
     }
-    if (project.shots.includes(shot) && shot.image === previousImage && shot.video === previousVideo && frameBrief(shot).prompt === prompt) {
+    const currentBrief = project.shots.includes(shot) && frameBrief(shot);
+    if (currentBrief && shot.image === previousImage && shot.video === previousVideo && currentBrief.prompt === prompt && refs.every((src,i)=>currentBrief.refs[i]===src) && refs.length===currentBrief.refs.length) {
       shot.image = result.image;
       await save();
       notify(shot.video ? "新图已保存。本镜已有视频，播放时优先使用视频。" : "本镜分镜图已生成。");
@@ -983,6 +994,17 @@ function targetField() {
     escapeHtml(project.author.length) + '" placeholder="如 119"></label>';
 }
 
+function referencePanel(shot) {
+  const brief = frameBrief(shot);
+  const slot = (key,label,note,src) => '<div class="ref-slot"><label class="field">'+label+
+    (src ? '<img alt="'+label+'" src="'+escapeHtml(src)+'">' : '')+
+    '<input type="file" accept="image/png,image/jpeg,image/webp" data-ref-upload="'+key+'"></label><small>'+note+'</small>'+
+    (shot[key] ? '<button class="plain-button" data-action="remove-'+key+'">移除上传图</button>' : '')+'</div>';
+  return '<section class="card ref-panel"><h2>绘图参考</h2><div class="ref-grid">'+
+    slot('sceneRef','上传场景图',brief.sceneIndex && !shot.sceneRef ? '当前沿用同场画面，可上传替换。' : '用于空间布局和光线。同名场景的后续镜头可沿用。',brief.refs[brief.sceneIndex-1])+
+    slot('visualRef','上传本镜参考图','用于这一镜的姿态、构图或道具。',shot.visualRef)+'</div><small>第 '+(selected+1)+' 镜已选 '+brief.refs.length+' 张（含角色图），当前平台上限 '+brief.limit+' 张。</small></section>';
+}
+
 function renderEditor() {
   const shot = project.shots[selected];
   const captions = escapeHtml(shot.line);
@@ -999,7 +1021,7 @@ function renderEditor() {
     '<div class="stage-footer"><span><b id="stage-name">' + escapeHtml(shot.name || "未命名分镜") + '</b> · 第 ' + (selected + 1) + ' 镜</span>' +
     '<button class="plain-button" data-action="' + (shot.video ? "preview-shot" : "preview") + '">' +
     (shot.video ? "▷ 播放本镜" : "▷ 预览整集") + '</button></div></section>' +
-    '<section class="card storyboard"><div class="card-header"><div><h2>分镜时间线</h2><small id="total-label">' + project.shots.length + ' 镜 · ' + formatSeconds(total()) +
+    referencePanel(shot) + '<section class="card storyboard"><div class="card-header"><div><h2>分镜时间线</h2><small id="total-label">' + project.shots.length + ' 镜 · ' + formatSeconds(total()) +
     ' 秒</small></div><div class="actions">' + targetField() + '<button class="button secondary" data-action="retime">按总时长分配</button><button class="button secondary" data-action="reframe" title="重新安排景别和运镜，保留对白和上传素材">重排景别与运镜</button>' +
     '<button class="button secondary" data-action="script">拍摄脚本</button>' +
     (hasLocalService() ? '<button class="button primary" data-action="'+(batchJob?'stop-batch':'batch')+'">'+(batchJob?'停止后续绘制（'+batchJob.index+'/'+batchJob.count+'）':'批量绘制缺图分镜')+'</button>' : '<button class="button secondary" data-action="setup-service">设置站内自动生成</button>') +
@@ -1027,7 +1049,7 @@ function renderEditor() {
     '</small><button class="plain-button" data-action="remove-video">移除视频</button></div>' : "") + '</div>' +
     '<div class="field"><span>构图示例</span><div class="thumbs">' + (styleImages[activeLook(project.author)] || styleImages.cinema).map((src, index) =>
       '<button data-image="' + index + '" aria-label="使用示例 ' + escapeHtml(framingOptions[shotPlans[index].framing]) + '" aria-pressed="' + (src === shot.image) + '">' + artTag(src) + "</button>"
-    ).join("") + '</div></div><div class="image-tools"><button class="button secondary" data-action="image-upload">上传图片</button>' +
+    ).join("") + '</div></div><div class="image-tools"><button class="button secondary" data-action="image-upload">导入本镜成图</button>' +
     '<button class="button secondary" data-action="audio-upload">' + (shot.audio ? "更换配音" : "上传配音") + '</button></div>' +
     '<input id="image-file" type="file" accept="image/*" hidden><input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" hidden>' +
     '<input id="video-file" type="file" accept="video/*,.mp4,.webm,.mov" hidden>' +
@@ -1728,6 +1750,7 @@ async function restoreProject(file) {
       !restored.author || typeof restored.title !== "string") throw new Error("项目格式错误");
   const safeImage = value => typeof value === "string" && (demoImage(value) || /^data:image\/(?:jpeg|webp|png);base64,/.test(value));
   for (const shot of restored.shots) {
+    if ([shot.sceneRef,shot.visualRef].some(src=>src && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(src))) throw new Error("参考图数据错误");
     if ((shot.image !== "" && !safeImage(shot.image)) || !Number.isFinite(shot.seconds) || shot.seconds <= 0 || typeof shot.line !== "string" ||
         (shot.videoPoster && !safeImage(shot.videoPoster))) throw new Error("分镜数据错误");
     if (shot.video) {
@@ -1755,6 +1778,8 @@ function handleAction(action) {
   if (!ready || exportJob) return;
   const shot = project.shots[selected];
   switch (action) {
+    case "remove-sceneRef": delete shot.sceneRef; refreshShot(); return;
+    case "remove-visualRef": delete shot.visualRef; refreshShot(); return;
     case "provider-key": void applyProviderKey(); return;
     case "retime":
       try { distributeTime(project.shots, project.author.length); refreshShot(); notify("时间线已按目标总时长分配。"); }
@@ -1960,6 +1985,17 @@ workspace.addEventListener("input", event => {
 
 workspace.addEventListener("change", event => {
   const input = event.target;
+  if (input.dataset.field === "sceneName") { refreshShot(); return; }
+  if (input.dataset.refUpload) {
+    const shot = project.shots[selected], key = input.dataset.refUpload, file = input.files[0];
+    if (!file || !["sceneRef","visualRef"].includes(key)) return;
+    void compressImage(file).then(src=>{
+      if (!project.shots.includes(shot)) return;
+      shot[key]=src;
+      if (step==="edit") refreshShot(); else void save();
+    }).catch(()=>notify("图片读取失败，请选 PNG、JPG 或 WebP。"));
+    return;
+  }
   if (input.id === "restore-project") {
     void restoreProject(input.files[0]).catch(() => notify("无法打开备份，请选择由漫剧工坊导出的完整项目。"));
     return;
@@ -1975,7 +2011,7 @@ workspace.addEventListener("change", event => {
     if (input.checked) ids.add(input.dataset.bindRole);
     else ids.delete(input.dataset.bindRole);
     shot.roleIds = [...ids];
-    void save();
+    refreshShot();
     return;
   }
   if (input.type === "file") void upload(input);

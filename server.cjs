@@ -52,6 +52,10 @@ function runCharacterServer() {
   };
   const html = path.join(__dirname, "Manju-Studio.html");
   if (!fs.existsSync(html)) throw new Error("请把启动器和 Manju-Studio.html 放在同一文件夹。");
+  const layoutFiles = {
+    "/studio-layout.css":["studio-layout.css","text/css; charset=utf-8"],
+    "/studio-layout.js":["studio-layout.js","text/javascript; charset=utf-8"]
+  };
   http.createServer(async (req, res) => {
     let settle;
     const reply = async (code, body) => {
@@ -67,6 +71,11 @@ function runCharacterServer() {
       res.end(JSON.stringify(body));
     };
     if (req.headers.host !== new URL(origin).host) return reply(403, {});
+    if (req.method === "GET" && Object.hasOwn(layoutFiles,req.url)) {
+      const [name,contentType] = layoutFiles[req.url];
+      res.writeHead(200,{"content-type":contentType,"cache-control":"no-store"});
+      return fs.createReadStream(path.join(__dirname,name)).pipe(res);
+    }
     if (credits && req.method === "GET" && req.url === "/credits") {
       try {
         const uid = await credits.identify(req);
@@ -116,7 +125,8 @@ function runCharacterServer() {
         const animationScript = animation ? '<script defer src="/video-generation.js"></script>' : '';
         page = page.replace("</head>", accountScript + animationScript + "</head>");
       }
-      return res.end(page);
+      const layout = '<link rel="stylesheet" href="/studio-layout.css"><script defer src="/studio-layout.js"></script>';
+      return res.end(page.replace("</head>",layout + "</head>"));
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
     const invite = Boolean(credits) && inviteOnly && req.url === "/credits/invite";

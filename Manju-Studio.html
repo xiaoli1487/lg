@@ -452,6 +452,7 @@ function generationPrompt(project, index) {
     "制作用途：" + production(project.author).label + "。" + production(project.author).brief,
     "场面调度：" + (shot.blocking?.trim() || "以首帧的前后遮挡和左右站位为基准；机位留在对话轴线同侧。看向画外的方向与对方上镜的位置对应。"),
     "光线与空间：" + (shot.lighting?.trim() || "以首帧最亮的一侧作为主光方向，切近景仍保留对应面部阴影和背景地标。人物清晰，背景运动幅度低于主动作。"),
+    ...[shot.composition && "初始构图：" + shot.composition, shot.propState && "道具起始状态：" + shot.propState, shot.ambientMotion && "环境动态：" + shot.ambientMotion].filter(Boolean),
     "动作节拍：0–" + firstBeat + "秒，" + start + " " + firstBeat + "–" + finalBeat + "秒，" + direction + " 最后至" + shot.seconds + "秒，" + end,
     "景别与构图：" + framing + "。" + focus + (speaker && shot.framing === "close" ? "镜头优先捕捉" + speaker + "的表情。" : ""),
     "运镜：" + (shot.cameraOverride || !shot.focus?.trim() ? camera : "按本镜构图说明执行") + "。一个连续镜头，让观众看清动作结果。",
@@ -607,7 +608,7 @@ function roleBindings(shot) {
     roles.map(role => '<label><input type="checkbox" data-bind-role="' + role.id + '" ' +
       (shot.roleIds?.includes(role.id) ? "checked" : "") + '> ' + escapeHtml(role.name) + '</label>').join("") : '<small>在「写故事 → 角色参考库」导入人物图。</small>') +
     '<label class="field">本镜场景名<input data-field="sceneName" maxlength="80" placeholder="例：办公室夜景" value="'+escapeHtml(shot.sceneName || "")+'"><small>同一地点和时段填同名，先做好该场景第一张图。后续镜头会沿用它的布景；转场请换名。</small></label>' +
-    Object.entries({blocking:"站位与视线", startPose:"起始姿态 / 道具在哪只手", endPose:"结束姿态 / 接给下一镜", lighting:"光源与环境"}).map(([key,label]) =>
+    Object.entries({composition:"机位与画面布局",propState:"首帧道具位置与状态",ambientMotion:"环境动态",cut:"与下一镜的接点",blocking:"站位与视线", startPose:"起始姿态 / 道具在哪只手", endPose:"结束姿态 / 接给下一镜", lighting:"光源与环境"}).map(([key,label]) =>
       '<label class="field">' + label + '<input data-field="' + key + '" value="' + escapeHtml(shot[key] || "") + '"></label>').join("") + '</div></details>';
 }
 
@@ -853,7 +854,6 @@ function frameBrief(shot) {
   const prompt = [
     "生成符合所选画风的独立分镜首帧。只呈现当前镜头的一个关键瞬间，主体留在中央9:16安全区域。无边框、字幕、气泡。",
     "用途：" + production(project.author).label + "。" + production(project.author).brief,
-    "剧名：" + project.title + "。故事背景：" + (project.author.idea || project.title),
     "第" + (index+1) + "镜：" + shot.name,
     "首帧定格：" + (shot.startPose || shot.direction || shot.line) + "。只画动作起始的一刻；连续动作留给视频。",
     "本镜台词（用于理解情绪，不在画中排字）：" + shot.line,
@@ -862,11 +862,11 @@ function frameBrief(shot) {
     anchor ? "同场布景依据：" + [anchor.blocking,anchor.lighting].filter(Boolean).join("。") + "。延续固定家具、门窗方位和主光方向，按本镜动作改变构图。" : "",
     sceneIndex ? "参考图"+sceneIndex+"仅作场景依据。沿用空间布局、材质和光色。本镜出场人物以本镜剧本和角色参考为准。" : "",
     visualIndex ? "参考图"+visualIndex+"用于本镜构图、姿态或道具细节。人物身份沿用角色图，地点沿用场景设定。" : "",
-    "构图：" + (framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot),
+    "构图：" + (shot.composition || ((framingOptions[shot.framing] || "按本镜动作选择主体与景别") + "。" + cameraFocus(shot))),
     "画风：" + styleInstructions(project.author),
-    ...[shot.blocking,shot.lighting].filter(Boolean),
+    ...[shot.blocking,shot.lighting,shot.propState && "首帧道具状态：" + shot.propState].filter(Boolean),
     ...roles.map((r,i) => "参考图" + (i+1) + "对应" + r.name + "，保留人物外观：" + (r.notes || "沿用参考图造型")),
-    previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。保持视线方向、持物手和动作轴线，按当前镜头重新构图。" : ""
+    previous && (sameScene(previous) || (!scene && !previous.sceneName)) ? "前镜接点：" + (previous.endPose || previous.name) + "。若前镜状态与本镜描述冲突，以本镜首帧和构图为准。" : ""
   ].filter(Boolean).join("\n");
   return {prompt, roles, refs, sceneIndex, visualIndex, limit};
 }
@@ -1116,7 +1116,7 @@ function renderEditor() {
     '<label class="field">整集画风<select data-look-select>' + selectOptions(styleNames, project.author.look) + '</select></label></div>' +
     (project.author.look === "custom" ? '<label class="field">自定义画风<input data-author="artStyle" maxlength="70" value="' + escapeHtml(project.author.artStyle) + '" placeholder="例：淡彩水墨，暖色调"></label>' : "") +
     '<details class="writing-options"><summary>整集画风提示词</summary>'+styleFields(project.author)+'</details><p class="timing" id="timing"></p>' +
-    '<button class="button primary" data-action="draw-shot"' + (drawingShots.has(shot) ? ' disabled aria-busy="true"' : '') + '>' +
+    '<button class="button quiet" data-action="frame-prompt">查看本镜绘图提示词</button><button class="button primary" data-action="draw-shot"' + (drawingShots.has(shot) ? ' disabled aria-busy="true"' : '') + '>' +
     (drawingShots.has(shot) ? '正在绘制本镜…' : drawingErrors.has(shot) ? '重试本镜' : '按本镜脚本生成分镜图') + '</button>' +
     (drawingErrors.has(shot) ? '<p class="notice" role="status">' + escapeHtml(drawingErrors.get(shot)) + '</p>' : '') +
     '<div class="video-tools"><div class="field"><span>TapNow 视频</span><small>复制本镜提示词，在 TapNow 生成后，把视频导回这里。</small></div>' +
@@ -1351,6 +1351,7 @@ async function onlineScreenplay(prompt, withImages = false) {
   finally { writingOnline = false; updateWritingButtons(false); }
 }
 
+const shotDetailFields = {"首帧":"startPose","站位":"blocking","光线":"lighting","构图":"composition","道具":"propState","环境动态":"ambientMotion","落点":"endPose","接镜":"cut"};
 function parseScreenplay(text) {
   const normalized = text.replace(/^\s*\x60{3}[^\n]*$/gm, "").replace(/^[ \t#*]*(【[^】]+】)/gm, "$1");
   const blocks = normalized.split(/^【[^】]+】/m).slice(1);
@@ -1361,14 +1362,14 @@ function parseScreenplay(text) {
     const camera = (lines.find(line => /^镜头[：:]/.test(line)) || "").replace(/^镜头[：:]\s*/, "");
     const sceneName = (lines.find(line => /^场景[：:]/.test(line)) || "").replace(/^场景[：:]\s*/, "");
     const staging = {};
-    for (const [label,key] of [["首帧","startPose"],["落点","endPose"],["站位","blocking"],["光线","lighting"]]) {
+    for (const [label,key] of Object.entries(shotDetailFields)) {
       const value = lines.find(line => line.startsWith(label+"：") || line.startsWith(label+":"));
       if (value) staging[key] = value.slice(label.length+1).trim();
     }
     const framing = Object.keys(framingOptions).find(key => camera.includes(framingOptions[key])) ||
       [["shoulder", /过肩/], ["detail", /局部|手部特写|物件特写/], ["rear", /背面远景|背影远景/], ["close", /近景|特写/], ["side", /侧面中景|跟拍/], ["wide", /全景|远景/]].find(([,rule]) => rule.test(camera + direction))?.[0];
     const motion = Object.keys(movementOptions).find(key => camera.includes(movementOptions[key].label));
-    const dialogue = lines.filter(line => !line.startsWith("△") && !/^(场景|镜头|首帧|落点|站位|光线)[：:]/.test(line)).join("\n").trim();
+    const dialogue = lines.filter(line => !line.startsWith("△") && !/^(场景|镜头|首帧|落点|站位|光线|构图|道具|环境动态|接镜)[：:]/.test(line)).join("\n").trim();
     return {
       name: (duration ? heading.slice(0, duration.index) : heading).trim(), line: dialogue, direction,
       framing, motion, sceneName, focus:camera, ...staging,
@@ -1931,6 +1932,7 @@ function handleAction(action) {
   if (!ready || exportJob) return;
   const shot = project.shots[selected];
   switch (action) {
+    case "frame-prompt": showText("本镜绘图提示词", frameBrief(shot).prompt); return;
     case "remove-sceneRef": delete shot.sceneRef; refreshShot(); return;
     case "remove-visualRef": delete shot.visualRef; refreshShot(); return;
     case "provider-key": void applyProviderKey(); return;
@@ -1979,14 +1981,15 @@ function handleAction(action) {
         "从这条点子独有的人物、动作或物件切入；让前一镜的具体结果引发下一镜。",
         "用《剧名》开头。地点、人物目标、转折、结局和每一镜可见动作都要从本次点子推导。",
         "角色：" + (a.cast || "按剧情取名") + "。场景：" + (a.location || "根据点子选择") + "。",
-        "按剧情选择镜数。每镜用下面三行格式，镜头标题里的秒数相加等于总时长。△ 后写具体景别、谁在什么位置、可见动作、光线和镜尾接点。对白自然，结尾回应开头的具体问题。",
+        "先在内部梳理目标、阻力、选择和结果，再按情节变化决定镜数。前一镜给出的信息或动作应影响后一镜。删掉只换角度却没有叙事用途的镜头。各镜秒数相加等于总时长，结尾兑现开头埋下的线索。",
         "每镜写可直接配音的一句旁白，补充人物心理、信息差或时间变化；用可见的肢体动作表现情绪。用户提供的原对白逐字保留。旁白与对白总字数应适合本镜秒数。",
         "每镜独立写一行镜头，明确景别及运镜。每个镜头都用【分镜】起头。",
         "【分镜】镜头标题 [本镜时长秒]\n△ 具体动作和镜尾状态\n镜头：本镜景别 / 本镜运镜\n旁白：原创旁白\n角色名：台词（有对白时填写）"
       ]).concat(
         "以下风格要求用于画面描述，保留原有故事与对白。"+styleInstructions(a),
-        "每镜单列六项。场景：地点与时段，同一场戏保持同名。首帧：用一句能画成照片的话交代主体、手中物件和动作起点。站位：本镜可见人物相对一个固定地标的位置与视线。光线：现场光源从哪侧照来，照亮什么。镜头：景别、机位和一种主运镜，写出移动后露出的剧情信息；固定镜头写清焦点。落点：动作结束时物件与人物的可见状态。",
-        "△ 行写在镜长内能完成的一次主动作和可见结果。多人对白按发言顺序安排视线与倾听反应；工序镜头拍清操作前后同一工件的变化；办事流程交代谁递交、谁接收及下一步。仅采用与本镜素材有关的调度，避免添加无关道具或动作。"
+        "每镜单列字段。场景：地点和时段，同场用完全相同的名称。首帧：冻结动作起始的一瞬，写清表情、身体朝向、重心、手势。站位：人物逐个说明相对地标的左右前后、遮挡和视线，对话机位保持同侧。构图：首帧景别、机位高度和朝向、焦点、前景与背景地标、哪些人物在画外。道具：首帧的位置、朝向、持物手和状态。",
+        "光线：光源在哪侧、照到什么、阴影落在哪里。镜头：一种主要运镜、起止构图和运镜后看到的信息。环境动态：只写视频内可见的变化，环境静止时保持静稳。落点：镜尾的人物姿势、视线和道具状态。接镜：下一镜承接的具体视线、动作或物件，换场时说明切换依据。",
+        "△ 行依次写本镜主动作、反应、可见结果。多人对白只让当前发言者动嘴，其余人物自然倾听。工序拍清同一工件前后变化。设备、尺寸、工艺和材质按素材，未提供的技术规格留空。用可见的画面细节表达情绪。"
       ).join("\n");
       void save();
       if (location.origin === "http://127.0.0.1:8793") {

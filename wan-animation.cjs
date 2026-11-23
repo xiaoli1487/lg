@@ -197,4 +197,4 @@ function createAnimation(apiKey, signingKey, rpc, request = fetch) {
   return {handle,reconcile};
 }
 
-module.exports = {createAnimation};
+module.exports = {createAnimation,resultUrl};

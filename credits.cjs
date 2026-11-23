@@ -33,8 +33,9 @@ function createCredits(auth, db, costs) {
     return {balance:balanceUnits(account) / creditScale, firstRecharge:!account?.hasRecharged};
   }
 
-  async function reserve(uid, route) {
-    const cost = unitCosts[route];
+  async function reserve(uid, route, points) {
+    const cost = points === undefined ? unitCosts[route] : points * creditScale;
+    if (!Number.isSafeInteger(cost) || cost < 1) throw new Error("积分价格无效。");
     const account = wallet(uid);
     const operation = account.collection("generation").doc(randomUUID());
     await db.runTransaction(async transaction => {

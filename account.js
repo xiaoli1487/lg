@@ -190,9 +190,12 @@ async function refreshCredits() {
         return item;
       }));
       packageList.hidden = false;
-      const {costs,rechargeContact} = data;
+      const {costs,rechargeContact,shotImageModels} = data;
+      const shotCost = shotImageModels?.length
+        ? Math.min(...shotImageModels.map(model=>model.points))+"–"+Math.max(...shotImageModels.map(model=>model.points))
+        : costs["/shot-image"];
       rechargePanel.querySelector("[data-prices]").textContent =
-        "生成扣费 · 脚本 "+costs["/write-story"]+" · 分镜图 "+costs["/shot-image"]+" · 三视图 "+costs["/three-view"]+" 积分";
+        "生成扣费 · 脚本 "+costs["/write-story"]+" · 分镜图 "+shotCost+" · 三视图 "+costs["/three-view"]+" 积分";
       rechargePanel.querySelector("[data-contact]").textContent = rechargeContact
         ? "将充值信息发给 "+rechargeContact+"，确认收款方式后付款。管理员核对到账后发放积分。"
         : "充值入口暂未开放。";

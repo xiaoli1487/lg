@@ -52,9 +52,11 @@ function runCharacterServer() {
   };
   const html = path.join(__dirname, "Manju-Studio.html");
   if (!fs.existsSync(html)) throw new Error("请把启动器和 Manju-Studio.html 放在同一文件夹。");
+  const shotImages = credits && managedProvider === "qwenpay" ? require("./shot-image-models.cjs") : null;
   const layoutFiles = {
     "/studio-layout.css":["studio-layout.css","text/css; charset=utf-8"],
-    "/studio-layout.js":["studio-layout.js","text/javascript; charset=utf-8"]
+    "/studio-layout.js":["studio-layout.js","text/javascript; charset=utf-8"],
+    "/shot-image-picker.js":["shot-image-picker.js","text/javascript; charset=utf-8"]
   };
   http.createServer(async (req, res) => {
     let settle;
@@ -82,6 +84,7 @@ function runCharacterServer() {
         return reply(200,{
           ...await credits.overview(uid),
           costs:credits.costs,
+          shotImageModels:shotImages?.options,
           packages:credits.packages,
           manualAdmin:uid===creditAdmin,
           giftAdmin:supabaseAuth && uid===creditAdmin,
@@ -126,7 +129,12 @@ function runCharacterServer() {
         page = page.replace("</head>", accountScript + animationScript + "</head>");
       }
       const layout = '<link rel="stylesheet" href="/studio-layout.css"><script defer src="/studio-layout.js"></script>';
-      return res.end(page.replace("</head>",layout + "</head>"));
+      const imagePicker = shotImages
+        ? '<script id="shot-image-catalog" type="application/json">' +
+          JSON.stringify({models:shotImages.options,defaultId:shotImages.defaultId}) +
+          '</script><script defer src="/shot-image-picker.js"></script>'
+        : '';
+      return res.end(page.replace("</head>",layout + imagePicker + "</head>"));
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
     const invite = Boolean(credits) && inviteOnly && req.url === "/credits/invite";
@@ -148,12 +156,18 @@ function runCharacterServer() {
       if (gift) return reply(200,await credits.addGift(uid,data));
       if (manualPayment) return reply(200,await credits.addManualPayment(uid,data));
       const { image, prompt, refs = [] } = data;
+      const shotModel = shotImages && req.url === "/shot-image"
+        ? shotImages.get(data.shotImageModel)
+        : null;
+      if (shotImages && req.url === "/shot-image" && (!shotModel || data.quotedPoints !== shotModel.points)) {
+        return reply(409,{error:"分镜图选项或积分报价有更新，请刷新页面后重试。",blocked:true});
+      }
       const provider = credits ? managedProvider : data.provider || "openai";
       if (!Object.hasOwn(vars,provider)) return reply(400,{error:"请选择支持的平台。"});
       const platform = {openai:"OpenAI",deepseek:"DeepSeek",qwen:"阿里云百炼",qwenpay:"千问按量付费"}[provider];
       const model = req.url === "/write-story"
         ? {openai:"gpt-4.1-mini",deepseek:"deepseek-flash",qwen:"qwen-plus",qwenpay:"qwen-plus"}[provider]
-        : provider === "openai" ? "gpt-image-1.5" : "qwen-image-3.0";
+        : shotModel?.upstream ?? (provider === "openai" ? "gpt-image-1.5" : "qwen-image-3.0");
       const accountFailure = status => reply(502, {error:credits ? "网站的模型服务暂不可用，请稍后再试。" : platform+"（"+model+"，HTTP "+status+"）"+accountErrors[status], blocked:true});
       const key = credits ? process.env[vars[provider]] : typeof data.key === "string" && /^\S{8,512}$/.test(data.key) ? data.key : "";
       if (!key) return reply(400,{error:"请在模型设置里填写 "+provider+" 的 API Key。",blocked:true});
@@ -185,9 +199,9 @@ function runCharacterServer() {
       const headers = {Authorization:"Bearer " + key};
       let body;
       if (["qwen","qwenpay"].includes(provider)) {
-        if (inputs.length > 3 || inputs.some(src=>typeof src!=="string" || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(src))) return reply(400,{error:"千问图像支持最多三张 PNG、JPEG 或 WebP 参考图。"});
+        if (inputs.length > 3 || inputs.some(src=>typeof src!=="string" || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(src))) return reply(400,{error:"绘图支持最多三张 PNG、JPEG 或 WebP 参考图。"});
         headers["Content-Type"]="application/json";
-        body=JSON.stringify({...parameters,response_format:"b64_json",...(inputs.length ? {image:inputs} : {})});
+        body=JSON.stringify({...parameters,n:1,response_format:shotModel?.format ?? "b64_json",...(inputs.length ? {image:inputs} : {})});
       } else if (inputs.length) {
         body = new FormData();
         for (const [key,value] of Object.entries(parameters)) body.set(key,value);
@@ -200,15 +214,20 @@ function runCharacterServer() {
         headers["Content-Type"] = "application/json";
         body = JSON.stringify(parameters);
       }
-      if (credits) settle = await credits.reserve(uid,req.url);
+      if (credits) settle = await credits.reserve(uid,req.url,shotModel?.points);
       const response = await fetch(base+"/images/" + (provider==="openai" && inputs.length ? "edits" : "generations"), {
         method:"POST", redirect:"error", headers, body,
         signal:AbortSignal.timeout(300000)
       });
       if (accountErrors[response.status]) return accountFailure(response.status);
       const result = await response.json();
-      if (!response.ok || !result.data?.[0]?.b64_json) return reply(502, { error: !credits && result.error?.message || "图像服务没有返回图片。" });
-      return reply(200, { image: "data:image/png;base64," + result.data[0].b64_json });
+      if (!response.ok) return reply(502,{error:!credits && result.error?.message || "图像服务没有返回图片。"});
+      const output = result.data?.[0];
+      const rendered = shotModel?.format === "url"
+        ? await shotImages.downloadResult(output?.url)
+        : output?.b64_json && "data:image/png;base64," + output.b64_json;
+      if (!rendered) return reply(502,{error:"图像服务没有返回可用的图片。"});
+      return reply(200,{image:rendered});
     } catch (error) {
       return reply(error.status || 500, { error: error.status ? error.message : "生成失败。请检查网络和参考图，再重试。", blocked:Boolean(error.status) });
     }

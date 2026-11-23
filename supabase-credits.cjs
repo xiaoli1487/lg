@@ -76,9 +76,11 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
     if (!user.id) throw creditError(502,"未收到账号编号，请在 Supabase 核对开户结果。");
     return {uid:user.id,email,password};
   }
-  async function reserve(uid, route) {
+  async function reserve(uid, route, points = costs[route]) {
+    const units = points * 10;
+    if (!Number.isSafeInteger(units) || units < 1) throw new Error("积分价格无效。");
     const id = randomUUID();
-    if (!await rpc("reserve",{p_uid:uid,p_id:id,p_units:costs[route]*10})) throw creditError(402,"积分不足。");
+    if (!await rpc("reserve",{p_uid:uid,p_id:id,p_units:units})) throw creditError(402,"积分不足。");
     return success => rpc("settle",{p_id:id,p_success:success});
   }
   async function addManualPayment(administrator, input) {

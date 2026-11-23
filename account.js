@@ -28,6 +28,14 @@ const walletStatus = document.createElement("p");
 walletStatus.setAttribute("role","status");
 walletStatus.hidden = true;
 status.after(walletStatus);
+const retryWallet = document.createElement("button");
+retryWallet.type = "button";
+retryWallet.className = "button secondary";
+retryWallet.textContent = "重试查询";
+retryWallet.hidden = true;
+walletStatus.after(retryWallet);
+let walletRequest = 0;
+retryWallet.onclick = () => void refreshCredits();
 const packageList = document.createElement("ul");
 packageList.hidden = true;
 walletStatus.after(packageList);
@@ -65,12 +73,20 @@ inviteForm.innerHTML = `
   <h3>开通试运营账号</h3>
   <label class="field">客户邮箱<input name="email" type="email" required maxlength="254"></label>
   <button class="button primary" type="submit">开通账号</button>
+  <details>
+    <summary>重置已有客户的密码</summary>
+    <label class="field">客户账号编号（User UID）<input name="resetUid" maxlength="36"></label>
+    <button class="button secondary" type="button" data-reset-invite>生成新密码</button>
+  </details>
   <p role="status"></p>
-  <textarea readonly hidden aria-label="账号登录信息"></textarea>`;
+  <textarea readonly hidden rows="4" style="width:100%" aria-label="账号登录信息"></textarea>
+  <button class="button secondary" type="button" data-copy-invite hidden>复制登录信息</button>`;
 dialog.append(inviteForm);
 const inviteStatus = inviteForm.querySelector('[role="status"]');
 const inviteResult = inviteForm.querySelector("textarea");
 const inviteSubmit = inviteForm.querySelector('button[type="submit"]');
+const resetInvite = inviteForm.querySelector("[data-reset-invite]");
+const copyInvite = inviteForm.querySelector("[data-copy-invite]");
 const changePassword = document.createElement("button");
 changePassword.type = "button";
 changePassword.className = "button secondary";
@@ -85,6 +101,8 @@ const packageLabel = pack => (pack.firstOnly ? "首充 · " : "") +
   "¥" + (pack.amountFen / 100) + " · " + pack.points + " 积分";
 
 function display(next) {
+  walletRequest++;
+  retryWallet.hidden = true;
   mode = next;
   const account = mode === "account";
   const secret = mode === "login" || mode === "register" || mode === "recovery";
@@ -122,12 +140,30 @@ function display(next) {
 async function refreshCredits() {
   const user = auth.currentUser;
   if (!user) return;
+  const request = ++walletRequest;
+  const stillCurrent = () => request === walletRequest && auth.currentUser?.uid === user.uid && mode === "account";
+  const controller = new AbortController();
+  let timer;
+  retryWallet.hidden = true;
   walletStatus.textContent = "正在查询积分…";
   try {
-    const response = await fetch("/credits",{headers:{Authorization:"Bearer "+await user.getIdToken()}});
-    const data = await response.json();
-    if (!response.ok) throw Error();
-    if (auth.currentUser === user && mode === "account") {
+    const query = async () => {
+      const token = await user.getIdToken();
+      const response = await fetch("/credits",{
+        headers:{Authorization:"Bearer "+token},signal:controller.signal
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "暂时无法查询积分。");
+      return data;
+    };
+    const deadline = new Promise((_,reject)=>{
+      timer = setTimeout(()=>{
+        reject(new Error("积分查询超时，请重试。"));
+        controller.abort();
+      },15000);
+    });
+    const data = await Promise.race([query(),deadline]);
+    if (stillCurrent()) {
       walletStatus.textContent = "余额 "+data.balance+" 积分 · 账号编号 "+user.uid;
       packages = data.packages;
       const visible = packages.filter(pack=>!pack.firstOnly || data.firstRecharge);
@@ -154,25 +190,50 @@ async function refreshCredits() {
       rechargeForm.hidden = !data.manualAdmin;
       inviteForm.hidden = !data.inviteAdmin;
     }
-  } catch {
-    if (auth.currentUser === user) walletStatus.textContent = "暂时无法查询积分。";
+  } catch (error) {
+    if (stillCurrent()) {
+      walletStatus.textContent = error.message || "暂时无法查询积分。";
+      retryWallet.hidden = false;
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 inviteForm.onsubmit = async event => {
   event.preventDefault();
+  await submitInvite({email:inviteForm.elements.email.value.trim()});
+};
+resetInvite.onclick = async () => {
+  const resetUid = inviteForm.elements.resetUid.value.trim();
+  if (!resetUid) {
+    inviteStatus.textContent = "请先填入客户的账号编号。";
+    return;
+  }
+  if (window.confirm("确定为这个客户生成新密码？原密码将失效。")) await submitInvite({resetUid});
+};
+copyInvite.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(inviteResult.value);
+    inviteStatus.textContent = "已复制登录信息，请私发给客户。";
+  } catch {
+    inviteResult.select();
+    inviteStatus.textContent = "登录信息已选中，请手动复制。";
+  }
+};
+async function submitInvite(input) {
   const user = auth?.currentUser;
   if (!user || inviteForm.hidden || inviteSubmit.disabled) return;
-  inviteSubmit.disabled = true;
+  inviteSubmit.disabled = resetInvite.disabled = true;
   inviteResult.hidden = true;
+  copyInvite.hidden = true;
   inviteResult.value = "";
-  inviteStatus.textContent = "正在开通账号…";
+  inviteStatus.textContent = input.resetUid ? "正在重置密码…" : "正在开通账号…";
   try {
-    const email = inviteForm.elements.email.value.trim();
     const response = await fetch("/credits/invite",{
       method:"POST",
       headers:{"Content-Type":"application/json",Authorization:"Bearer "+await user.getIdToken()},
-      body:JSON.stringify({email})
+      body:JSON.stringify(input)
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "开户失败。");
@@ -180,11 +241,12 @@ inviteForm.onsubmit = async event => {
     inviteForm.reset();
     inviteResult.value = "登录网址："+location.origin+"\n邮箱："+data.email+"\n初始密码："+data.password;
     inviteResult.hidden = false;
-    inviteResult.select();
-    inviteStatus.textContent = "账号已开通。请复制登录信息并私发给客户，客户登录后可修改密码。";
+    copyInvite.hidden = false;
+    inviteResult.scrollIntoView({block:"nearest"});
+    inviteStatus.textContent = (input.resetUid ? "密码已重置。" : "账号已开通。") + "请复制登录信息并私发给客户。";
   } catch (error) { inviteStatus.textContent = error.message; }
-  finally { inviteSubmit.disabled = false; }
-};
+  finally { inviteSubmit.disabled = resetInvite.disabled = false; }
+}
 
 copyRecharge.onclick = async () => {
   const user = auth?.currentUser;
@@ -312,9 +374,11 @@ entry.onclick = async () => {
 };
 form.querySelector("[data-close]").onclick = () => dialog.close();
 dialog.onclose = () => {
+  walletRequest++;
   password.value = "";
   inviteForm.reset();
   inviteResult.hidden = true;
+  copyInvite.hidden = true;
   inviteResult.value = "";
   inviteStatus.textContent = "";
 };

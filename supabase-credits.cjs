@@ -35,6 +35,26 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
     return user.id;
   }
   async function invite(input) {
+    const resetUid = input?.resetUid;
+    if (resetUid !== undefined) {
+      if (typeof resetUid !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(resetUid) || resetUid === administrator) {
+        throw creditError(400,"请输入客户账号编号。");
+      }
+      const path = "/auth/v1/admin/users/" + resetUid;
+      const lookup = await call(path,{headers:adminHeaders()});
+      if (!lookup.ok) throw creditError(lookup.status === 404 ? 404 : 502,"无法找到该客户账号，请核对账号编号。");
+      const result = await lookup.json();
+      const customer = result.user ?? result;
+      if (customer.id !== resetUid || customer.app_metadata?.manju_invited !== true) {
+        throw creditError(403,"仅可在这里重置受邀客户的密码。");
+      }
+      const password = randomBytes(18).toString("base64url");
+      const updated = await call(path,{
+        method:"PUT",headers:adminHeaders(),body:JSON.stringify({password})
+      });
+      if (!updated.ok) throw creditError(502,"密码重置失败，请稍后重试。");
+      return {uid:customer.id,email:customer.email,password};
+    }
     const email = typeof input?.email === "string" ? input.email.trim() : "";
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw creditError(400,"请输入有效的客户邮箱。");

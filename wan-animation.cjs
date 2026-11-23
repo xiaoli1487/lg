@@ -1,4 +1,4 @@
-const {createHmac, timingSafeEqual} = require("node:crypto");
+const {createHash, createHmac, timingSafeEqual} = require("node:crypto");
 const {Readable} = require("node:stream");
 const {pipeline} = require("node:stream/promises");
 
@@ -7,20 +7,34 @@ const taskId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const firstFrame = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 const maxBody = Math.ceil(10 * 1024 * 1024 * 4 / 3) + 131072;
 
-const defaultModel = "wan2.2-i2v-flash";
+const defaultModel = "economy";
 const models = [
-  {id:defaultModel,name:"万相 2.2 Flash",min:5,max:5,promptLimit:800,
+  {id:defaultModel,name:"轻量版",upstream:"wan2.2-i2v-flash",min:5,max:5,promptLimit:800,
     price:{ "480P":[10], "720P":[20], "1080P":[48] }},
-  {id:"wan2.2-i2v-plus",name:"万相 2.2 Plus",min:5,max:5,promptLimit:800,
+  {id:"detail",name:"细节版",upstream:"wan2.2-i2v-plus",min:5,max:5,promptLimit:800,
     price:{ "480P":[14], "1080P":[70] }},
-  {id:"wan2.6-i2v-flash",name:"万相 2.6 Flash",min:2,max:15,promptLimit:1500,
+  {id:"flex",name:"灵活版",upstream:"wan2.6-i2v-flash",min:2,max:15,promptLimit:1500,
     price:{ "720P":[15,30], "1080P":[25,50] }},
-  {id:"wan3.0-video",name:"万相 3.0",min:2,max:30,promptLimit:20000,
+  {id:"narrative",name:"叙事版",upstream:"wan3.0-video",min:2,max:30,promptLimit:20000,
     price:{ "480P":[30,30], "720P":[60,60], "1080P":[120,120] }}
 ];
 
 
-function createAnimation(apiKey, signingKey, request = fetch) {
+const publicModels = models.map(({id,name,min,max,promptLimit,price})=>({id,name,min,max,promptLimit,price}));
+
+function resultUrl(value) {
+  let url;
+  try { url = new URL(value); }
+  catch { return null; }
+  const oss = /^(?!.*-internal\.aliyuncs\.com$)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.(?:oss-[a-z0-9-]+|[a-z0-9-]+\.oss)\.aliyuncs\.com$/;
+  const service = /^(?:[a-z0-9-]+\.)+(?:qianwenai(?:api)?\.com|qwencloudapi\.com)$/;
+  if (!oss.test(url.hostname) && !service.test(url.hostname)) return null;
+  if (url.port || url.username || url.password) return null;
+  if (url.protocol === "http:") url.protocol = "https:";
+  return url.protocol === "https:" ? url : null;
+}
+
+function createAnimation(apiKey, signingKey, rpc, request = fetch) {
   function signature(uid, id) {
     return createHmac("sha256",signingKey).update("manju-wan-v1:" + uid + ":" + id).digest();
   }
@@ -43,6 +57,39 @@ function createAnimation(apiKey, signingKey, request = fetch) {
     return {response, output:payload?.output, code:payload?.code};
   }
 
+  async function update(job, state) {
+    return rpc("video_update",{p_id:job.id,p_remote:job.remote,p_state:state});
+  }
+
+  async function inspect(remote) {
+    const {response,output} = await provider("/tasks/" + remote);
+    if (response.status === 404 || output?.task_status === "UNKNOWN") return {state:"expired"};
+    if (!response.ok || !output) throw new Error("Video status unavailable");
+    if (["FAILED","CANCELED","CANCELLED"].includes(output.task_status)) return {state:"failed"};
+    if (output.task_status !== "SUCCEEDED") return {state:"pending"};
+    const url = resultUrl(output.video_url);
+    if (!url) console.warn("Video result host not supported");
+    return url ? {state:"ready",url} : {state:"failed"};
+  }
+
+  let reconciling = false;
+  async function reconcile() {
+    if (reconciling) return;
+    reconciling = true;
+    try {
+      const jobs = await rpc("video_due",{});
+      await Promise.allSettled(jobs.map(async job=>{
+        if (!job.remote) return update(job,"expired");
+        try { return await update(job,(await inspect(job.remote)).state); }
+        catch {
+          await update(job,"pending");
+          throw new Error("Video settlement delayed");
+        }
+      }));
+    } catch { console.error("Video settlement database unavailable"); }
+    finally { reconciling = false; }
+  }
+
   async function handle(req,res,reply,uid) {
     let size = 0;
     const chunks = [];
@@ -54,9 +101,12 @@ function createAnimation(apiKey, signingKey, request = fetch) {
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
     catch { return reply(400,{error:"请求格式有误。"}); }
-    if (data?.action === "access") return reply(200,{enabled:true,models});
+    if (data?.action === "access") return reply(200,{enabled:true,models:publicModels});
     if (data?.action === "create") {
-      const {image,prompt} = data;
+      const {image,prompt,requestId} = data;
+      if (typeof requestId !== "string" || !taskId.test(requestId)) {
+        return reply(400,{error:"请刷新页面后提交新动画任务。"});
+      }
       const {model = defaultModel,resolution = "480P",duration = 5,audio = false} = data;
       const spec = models.find(item=>item.id === model);
       const rates = spec && typeof resolution === "string" && Object.hasOwn(spec.price,resolution) && spec.price[resolution];
@@ -69,57 +119,72 @@ function createAnimation(apiKey, signingKey, request = fetch) {
           typeof prompt !== "string" || !prompt.trim() || Array.from(prompt).length > spec.promptLimit) {
         return reply(400,{error:"请使用 10 MB 以内的 PNG、JPG 或 WebP，并将动画提示词控制在 "+spec.promptLimit+" 字以内。"});
       }
-      const unified = model === "wan3.0-video";
+      const fingerprint = createHash("sha256").update(JSON.stringify([model,resolution,duration,audio,image,prompt])).digest("hex");
+      const reservation = await rpc("video_begin",{
+        p_uid:uid,p_id:requestId,p_units:rates[Number(audio)]*duration*10,p_fingerprint:fingerprint
+      });
+      if (reservation === "insufficient") return reply(402,{error:"积分不足，本次需要 "+rates[Number(audio)]*duration+" 积分。"});
+      if (reservation === "conflict") return reply(409,{error:"本次提交内容有变，请重新确认生成设置。"});
+      const localJob = "v2." + requestId + "." + signature(uid,"v2:"+requestId).toString("hex");
+      if (reservation === "existing") return reply(202,{job:localJob});
+      if (reservation !== "created") throw new Error("Credit reservation unavailable");
+      const unified = model === "narrative";
       const input = unified ? {prompt,media:[{type:"first_frame",url:image}]} : {img_url:image,prompt};
       const parameters = {resolution,duration,prompt_extend:false};
       if (unified) parameters.ratio = "adaptive";
       if (rates.length === 2) parameters.audio = audio;
       const {response,output,code} = await provider("/services/aigc/video-generation/video-synthesis",{
-        model,input,parameters
+        model:spec.upstream,input,parameters
       }).catch(()=>({response:null,output:null}));
-      if (!response) return reply(502,{error:"连接中断，未能确认任务是否提交。请先到千问平台核对任务和用量。"});
-      if ([401,403,404].includes(response.status) || ["ModelNotFound","ModelNotAvailable","AccessDenied"].includes(code)) {
-        return reply(502,{error:"千问按量付费账号暂无法调用"+spec.name+"，请检查模型权限或换一个模型。"});
+      if (!response || response.status >= 500) return reply(202,{job:localJob});
+      if (!response.ok) {
+        await update({id:requestId,remote:null},"failed");
+        if (response.status === 429) return reply(429,{error:"动画请求较多，请稍后再试。预扣积分已退回。"});
+        if ([401,403,404].includes(response.status) || ["ModelNotFound","ModelNotAvailable","AccessDenied"].includes(code)) {
+          return reply(422,{error:spec.name+"暂不可用，请换一个模型。预扣积分已退回。"});
+        }
+        return reply(422,{error:"生成请求被拒绝，请检查首帧素材和提示词。预扣积分已退回。"});
       }
-      if (response.status === 400) return reply(400,{error:"千问平台拒绝了"+spec.name+"的生成请求，请检查首帧素材和提示词。"});
-      if (response.status === 429) return reply(429,{error:"千问平台请求过多，请稍后再试。"});
-      if (!response.ok || typeof output?.task_id !== "string" || !taskId.test(output.task_id)) {
-        return reply(502,{error:"未能确认任务是否提交。请先到千问平台核对任务和用量。"});
+      if (typeof output?.task_id === "string" && taskId.test(output.task_id)) {
+        const submitted = {id:requestId,remote:output.task_id};
+        await update(submitted,"pending").catch(()=>update(submitted,"pending"));
       }
-      const id = output.task_id;
-      return reply(202,{job:id + "." + signature(uid,id).toString("hex")});
+      return reply(202,{job:localJob});
     }
     if (!["status","download"].includes(data?.action)) return reply(400,{error:"不支持此操作。"});
-    const id = verify(uid,data.job);
-    if (!id) return reply(404,{error:"动画任务无效。"});
-    const {response,output} = await provider("/tasks/" + id);
-    if (response.status === 404) return reply(200,{state:"expired"});
-    if (!response.ok || !output) return reply(502,{error:"暂时查不到动画任务，请稍后继续查询。"});
-    const state = output.task_status;
-    if (["FAILED","CANCELED","CANCELLED"].includes(state)) return reply(200,{state:"failed"});
-    if (state === "UNKNOWN") return reply(200,{state:"expired"});
-    if (state !== "SUCCEEDED") return reply(200,{state:"pending"});
-    if (data.action === "status") return reply(200,{state:"ready"});
+    let result;
+    if (typeof data.job === "string" && data.job.startsWith("v2.")) {
+      const [,id,proof] = data.job.split(".");
+      if (data.job.length !== 104 || !taskId.test(id) || !/^[0-9a-f]{64}$/.test(proof || "") ||
+          !timingSafeEqual(signature(uid,"v2:"+id),Buffer.from(proof,"hex"))) {
+        return reply(404,{error:"动画任务不存在。"});
+      }
+      const job = await rpc("video_job",{p_id:id,p_uid:uid});
+      if (!job) return reply(404,{error:"动画任务不存在。"});
+      if (["failed","expired"].includes(job.state)) return reply(200,{state:job.state});
+      if (!job.remote) return reply(200,{state:"pending"});
+      if (job.state === "ready" && data.action === "status") return reply(200,{state:"ready"});
+      result = await inspect(job.remote);
+      if (job.state === "pending") {
+        const state = await update(job,result.state);
+        if (state !== result.state) return reply(200,{state});
+      }
+    } else {
+      const id = verify(uid,data.job);
+      if (!id) return reply(404,{error:"动画任务无效。"});
+      result = await inspect(id);
+    }
+    if (result.state !== "ready" || data.action === "status") return reply(200,{state:result.state});
 
-    let url;
-    try { url = new URL(output.video_url); }
-    catch { return reply(502,{error:"千问平台没有返回可用的视频文件。"}); }
-    const publicOssHost = /^(?!.*-internal\.aliyuncs\.com$)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.(?:oss-[a-z0-9-]+|[a-z0-9-]+\.oss)\.aliyuncs\.com$/;
-    const qwenHost = /^(?:[a-z0-9-]+\.)+(?:qianwenai(?:api)?\.com|qwencloudapi\.com)$/;
-    const canProxy = publicOssHost.test(url.hostname) || qwenHost.test(url.hostname);
-    if (url.protocol === "http:" && canProxy) url.protocol = "https:";
-    if (url.protocol !== "https:" || url.port || url.username || url.password) {
-      console.warn("Wan result URL not accepted", {protocol:url.protocol, hostname:url.hostname});
-      return reply(502,{error:"千问平台返回了非安全视频地址，请从千问任务记录下载源文件。"});
-    }
-    if (!canProxy) {
-      console.warn("Wan result uses a separate download host", {hostname:url.hostname});
-      return reply(200,{state:"external",videoUrl:url.href});
-    }
-    const video = await request(url,{redirect:"manual",signal:AbortSignal.timeout(90000)});
-    if (video.status >= 300 && video.status < 400) {
+    let url = result.url;
+    let video;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      video = await request(url,{redirect:"manual",signal:AbortSignal.timeout(90000)});
+      if (video.status < 300 || video.status >= 400) break;
+      const location = video.headers.get("location");
       await video.body?.cancel();
-      return reply(200,{state:"external",videoUrl:url.href});
+      url = location && resultUrl(new URL(location,url));
+      if (!url) return reply(502,{error:"暂时无法下载动画，请稍后继续查询。"});
     }
     if (video.status === 403 || video.status === 404) return reply(200,{state:"expired"});
     if (!video.ok || !video.body || !/^(video\/mp4|application\/octet-stream)\b/i.test(video.headers.get("content-type") || "")) {
@@ -129,7 +194,7 @@ function createAnimation(apiKey, signingKey, request = fetch) {
     await pipeline(Readable.fromWeb(video.body),res);
   }
 
-  return {handle};
+  return {handle,reconcile};
 }
 
 module.exports = {createAnimation};

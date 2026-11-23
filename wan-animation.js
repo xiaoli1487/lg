@@ -1,16 +1,15 @@
 (() => {
   const running = new WeakSet();
   const messages = new WeakMap();
-  const externalDownloads = new WeakMap();
   let enabled = false;
   let models = [];
   let accessCheck = 0;
 
   async function animationRequest(body) {
-    const response = await requestGeneration("/wan-animation",body);
+    const response = await requestGeneration("/video-generation",body);
     if (!response.ok) {
       const data = await response.json().catch(()=>({}));
-      throw Error(data.error || "动画服务连接失败。");
+      throw Object.assign(Error(data.error || "动画服务连接失败。"),{status:response.status});
     }
     return response;
   }
@@ -34,7 +33,10 @@
 
   function settingsFor(shot) {
     const saved = shot.animationSettings;
-    const model = models.find(item=>item.id === saved?.model) ?? models[0];
+    const formerId = typeof saved?.model === "string" ? saved.model : "";
+    const migrated = formerId.endsWith("2.2-i2v-plus") ? "detail" :
+      formerId.endsWith("2.6-i2v-flash") ? "flex" : formerId.endsWith("3.0-video") ? "narrative" : "economy";
+    const model = models.find(item=>item.id === formerId) ?? models.find(item=>item.id === migrated) ?? models[0];
     const resolution = typeof saved?.resolution === "string" && Object.hasOwn(model.price,saved.resolution)
       ? saved.resolution : Object.keys(model.price)[0];
     const planned = shot.wanJob && !saved ? 5 : Math.round(shot.seconds) || 5;
@@ -44,7 +46,7 @@
   }
 
   function estimatedCost(model, settings) {
-    return (model.price[settings.resolution][Number(settings.audio)] * settings.duration / 100).toFixed(2);
+    return model.price[settings.resolution][Number(settings.audio)] * settings.duration;
   }
 
   function renderAnimation() {
@@ -86,7 +88,7 @@
     }
     const info = document.createElement("small");
     info.textContent = settings.resolution + " · " + settings.duration + " 秒 · " +
-      (settings.audio ? "有声" : "无声") + " · 模型按量价约 ¥" + estimatedCost(model,settings) + "／段";
+      (settings.audio ? "有声" : "无声") + " · 本次 " + estimatedCost(model,settings) + " 积分";
     label.append(info);
     const actions = document.createElement("div");
     actions.className = "actions";
@@ -97,23 +99,13 @@
     generate.disabled = running.has(shot) || (!shot.wanJob && !canAnimate(shot));
     generate.onclick = () => void animate(shot);
     actions.append(generate);
-    if (shot.video instanceof Blob && shot.videoName?.startsWith("万相动画-")) {
+    if (shot.video instanceof Blob && shot.videoName?.includes("动画-")) {
       const saveClip = document.createElement("button");
       saveClip.type = "button";
       saveClip.className = "button secondary";
       saveClip.textContent = "下载 MP4";
       saveClip.onclick = () => download(shot.video,shot.videoName);
       actions.append(saveClip);
-    }
-    const externalUrl = externalDownloads.get(shot);
-    if (externalUrl) {
-      const link = document.createElement("a");
-      link.className = "button secondary";
-      link.textContent = "打开原视频";
-      link.href = externalUrl;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      actions.append(link);
     }
     const status = document.createElement("small");
     status.setAttribute("role","status");
@@ -141,8 +133,7 @@
     const model = models.find(item=>item.id === settings.model);
     if (!shot.wanJob && (!canAnimate(shot) ||
         !window.confirm("用" + model.name + "生成 " + settings.resolution + "、" + settings.duration +
-          " 秒动画，模型费用约 ¥" + estimatedCost(model,settings) + "。会将本镜首帧和画面动作" +
-          (settings.audio && shot.line?.trim() ? "及对白" : "") + "发送给千问平台。"
+          " 秒动画，将预扣 " + estimatedCost(model,settings) + " 积分。生成失败会退回积分。"
           + (originalVideo ? "生成成功后将替换本镜现有视频。" : "") + "确认生成？"))) return;
     const report = message => {
       messages.set(shot,message);
@@ -152,11 +143,15 @@
     report(shot.wanJob ? "正在查询任务…" : "正在提交首帧…");
     try {
       if (!shot.wanJob) {
-        const response = await animationRequest({action:"create",image:originalImage,
+        const requestId = shot.videoRequestId || crypto.randomUUID();
+        shot.videoRequestId = requestId;
+        shot.animationSettings = settings;
+        await save();
+        const response = await animationRequest({action:"create",requestId,image:originalImage,
           prompt:animationPrompt(shot,settings,model.promptLimit),...settings});
         const {job} = await response.json();
         if (!project.shots.includes(shot)) return;
-        shot.animationSettings = settings;
+        delete shot.videoRequestId;
         shot.wanJob = job;
         await save();
       }
@@ -167,25 +162,16 @@
         const {state} = await response.json();
         if (state === "failed" || state === "expired") {
           delete shot.wanJob;
-          externalDownloads.delete(shot);
           void save();
-          report(state === "failed" ? "动画生成失败，可重新生成。" : "任务已过期，可重新生成。");
+          report(state === "failed" ? "动画生成失败。若已预扣积分，已退回钱包。" : "任务已结束或过期，可重新提交。");
           return;
         }
         if (state === "ready") {
           const output = await animationRequest({action:"download",job});
           if (output.headers.get("content-type") !== "video/mp4") {
             const result = await output.json();
-            if (result.state === "external") {
-              const url = new URL(result.videoUrl);
-              if (url.protocol !== "https:" || url.username || url.password || url.port) throw Error("视频地址无效。");
-              externalDownloads.set(shot,url.href);
-              report("动画已生成。可打开原视频下载，再用「导入视频」放回本镜。");
-              return;
-            }
             if (result.state === "expired") {
               delete shot.wanJob;
-              externalDownloads.delete(shot);
               void save();
               report("视频下载链接已过期，可重新生成。");
               return;
@@ -193,13 +179,12 @@
             throw Error("暂时无法读取视频，请继续查询。");
           }
           const video = await output.blob();
-          const name = "万相动画-" + (shot.name || "未命名分镜") + ".mp4";
+          const name = "动画-" + (shot.name || "未命名分镜") + ".mp4";
           const clip = await loadClip(video);
           try {
             if (!project.shots.includes(shot) || shot.image !== originalImage || shot.video !== originalVideo) {
               download(video,name);
               delete shot.wanJob;
-              externalDownloads.delete(shot);
               void save();
               notify("分镜素材已变更，动画已单独下载。");
               return;
@@ -211,7 +196,6 @@
             shot.videoName = name;
             shot.videoDuration = duration;
             delete shot.wanJob;
-            externalDownloads.delete(shot);
           } finally {
             releaseClip(clip);
           }
@@ -221,11 +205,15 @@
           notify("动画已生成并加入分镜。");
           return;
         }
-        report("千问平台正在生成动画，可先编辑其他分镜。");
+        report("正在生成动画，可先编辑其他分镜。");
         await new Promise(resolve => setTimeout(resolve,15000));
       }
       report("任务仍在生成，可点「继续查询动画」。");
     } catch (error) {
+      if (shot.videoRequestId && error.status >= 400 && error.status < 500) {
+        delete shot.videoRequestId;
+        void save();
+      }
       report(error.message || "请求未完成。");
     } finally {
       running.delete(shot);

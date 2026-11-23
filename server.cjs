@@ -33,7 +33,8 @@ function runCharacterServer() {
         supabaseUrl,supabaseKey,secret,costs,{inviteOnly,administrator:creditAdmin}
       );
       if (creditAdmin && process.env.QIANWEN_API_KEY && !process.env.QIANWEN_API_KEY.startsWith("sk-sp-")) {
-        animation = require("./wan-animation.cjs").createAnimation(process.env.QIANWEN_API_KEY,secret);
+        animation = require("./wan-animation.cjs").createAnimation(process.env.QIANWEN_API_KEY,secret,credits.videoRpc);
+        setInterval(()=>void animation.reconcile(),45000).unref();
       }
     } else {
       const {initializeApp,cert} = require("firebase-admin/app");
@@ -81,18 +82,17 @@ function runCharacterServer() {
       }
       catch (error) { return reply(error.status || 503,{error:error.status ? error.message : "暂时无法查询积分。"}); }
     }
-    if (animation && req.method === "GET" && req.url === "/wan-animation.js") {
+    if (animation && req.method === "GET" && req.url === "/video-generation.js") {
       res.writeHead(200, {"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
       return fs.createReadStream(path.join(__dirname,"wan-animation.js")).pipe(res);
     }
-    if (animation && req.method === "POST" && req.url === "/wan-animation" && req.headers.origin === origin) {
+    if (animation && req.method === "POST" && ["/video-generation","/wan-animation"].includes(req.url) && req.headers.origin === origin) {
       try {
         const uid = await credits.identify(req);
-        if (uid !== creditAdmin) return reply(403,{error:"动画生成功能目前仅向管理员开放。"});
         return await animation.handle(req,res,reply,uid);
       } catch (error) {
         if (res.headersSent) return res.destroy();
-        return reply(error.status || 502,{error:error.status ? error.message : "千问视频服务暂不可用，请稍后查询。"});
+        return reply(error.status || 502,{error:error.status ? error.message : "动画服务暂不可用，请稍后查询。"});
       }
     }
     if (authEnabled && req.method === "GET" && req.url === "/account.js") {
@@ -113,7 +113,7 @@ function runCharacterServer() {
       }
       if (authEnabled) {
         const accountScript = '<script type="module" src="/account.js"></script>';
-        const animationScript = animation ? '<script defer src="/wan-animation.js"></script>' : '';
+        const animationScript = animation ? '<script defer src="/video-generation.js"></script>' : '';
         page = page.replace("</head>", accountScript + animationScript + "</head>");
       }
       return res.end(page);

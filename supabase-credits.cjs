@@ -114,7 +114,7 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
     if (result === "conflict") throw creditError(409,"赠送请求与原记录不符，请核对后重试。");
     throw new Error("无法确认赠送结果。");
   }
-  return {identify,invite,overview:uid=>rpc("wallet",{p_uid:uid}),reserve,addManualPayment,addGift,costs,packages};
+  return {identify,invite,videoRpc:rpc,overview:uid=>rpc("wallet",{p_uid:uid}),reserve,addManualPayment,addGift,costs,packages};
 }
 
 module.exports = {createSupabaseCredits};

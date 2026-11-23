@@ -5,7 +5,20 @@ const {pipeline} = require("node:stream/promises");
 const base = "https://maas.qianwenaiapi.com/api/v1";
 const taskId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const firstFrame = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
-const maxBody = Math.ceil(10 * 1024 * 1024 * 4 / 3) + 8192;
+const maxBody = Math.ceil(10 * 1024 * 1024 * 4 / 3) + 131072;
+
+const defaultModel = "wan2.2-i2v-flash";
+const models = [
+  {id:defaultModel,name:"万相 2.2 Flash",min:5,max:5,promptLimit:800,
+    price:{ "480P":[10], "720P":[20], "1080P":[48] }},
+  {id:"wan2.2-i2v-plus",name:"万相 2.2 Plus",min:5,max:5,promptLimit:800,
+    price:{ "480P":[14], "1080P":[70] }},
+  {id:"wan2.6-i2v-flash",name:"万相 2.6 Flash",min:2,max:15,promptLimit:1500,
+    price:{ "720P":[15,30], "1080P":[25,50] }},
+  {id:"wan3.0-video",name:"万相 3.0",min:2,max:30,promptLimit:20000,
+    price:{ "480P":[30,30], "720P":[60,60], "1080P":[120,120] }}
+];
+
 
 function createAnimation(apiKey, signingKey, request = fetch) {
   function signature(uid, id) {
@@ -27,7 +40,7 @@ function createAnimation(apiKey, signingKey, request = fetch) {
       body:input && JSON.stringify(input), redirect:"error", signal:AbortSignal.timeout(20000)
     });
     const payload = await response.json().catch(()=>null);
-    return {response, output:payload?.output};
+    return {response, output:payload?.output, code:payload?.code};
   }
 
   async function handle(req,res,reply,uid) {
@@ -41,20 +54,34 @@ function createAnimation(apiKey, signingKey, request = fetch) {
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
     catch { return reply(400,{error:"请求格式有误。"}); }
-    if (data?.action === "access") return reply(200,{enabled:true});
+    if (data?.action === "access") return reply(200,{enabled:true,models});
     if (data?.action === "create") {
       const {image,prompt} = data;
+      const {model = defaultModel,resolution = "480P",duration = 5,audio = false} = data;
+      const spec = models.find(item=>item.id === model);
+      const rates = spec && typeof resolution === "string" && Object.hasOwn(spec.price,resolution) && spec.price[resolution];
+      if (!rates || !Number.isInteger(duration) || duration < spec.min || duration > spec.max ||
+          typeof audio !== "boolean" || (audio && rates.length < 2)) {
+        return reply(400,{error:"请选择该视频模型支持的分辨率、时长和声音设置。"});
+      }
       if (typeof image !== "string" || !firstFrame.test(image) ||
           Buffer.byteLength(image.slice(image.indexOf(",")+1),"base64") > 10 * 1024 * 1024 ||
-          typeof prompt !== "string" || !prompt.trim() || Array.from(prompt).length > 800) {
-        return reply(400,{error:"请使用 10 MB 以内的 PNG、JPG 或 WebP，并将动画提示词控制在 800 字以内。"});
+          typeof prompt !== "string" || !prompt.trim() || Array.from(prompt).length > spec.promptLimit) {
+        return reply(400,{error:"请使用 10 MB 以内的 PNG、JPG 或 WebP，并将动画提示词控制在 "+spec.promptLimit+" 字以内。"});
       }
-      const {response,output} = await provider("/services/aigc/video-generation/video-synthesis",{
-        model:"wan2.2-i2v-flash", input:{img_url:image,prompt},
-        parameters:{resolution:"480P",duration:5,prompt_extend:false}
+      const unified = model === "wan3.0-video";
+      const input = unified ? {prompt,media:[{type:"first_frame",url:image}]} : {img_url:image,prompt};
+      const parameters = {resolution,duration,prompt_extend:false};
+      if (unified) parameters.ratio = "adaptive";
+      if (rates.length === 2) parameters.audio = audio;
+      const {response,output,code} = await provider("/services/aigc/video-generation/video-synthesis",{
+        model,input,parameters
       }).catch(()=>({response:null,output:null}));
       if (!response) return reply(502,{error:"连接中断，未能确认任务是否提交。请先到千问平台核对任务和用量。"});
-      if ([401,403].includes(response.status)) return reply(502,{error:"千问按量付费账号暂无法调用万相 2.2 Flash，请核对模型权限与密钥。"});
+      if ([401,403,404].includes(response.status) || ["ModelNotFound","ModelNotAvailable","AccessDenied"].includes(code)) {
+        return reply(502,{error:"千问按量付费账号暂无法调用"+spec.name+"，请检查模型权限或换一个模型。"});
+      }
+      if (response.status === 400) return reply(400,{error:"千问平台拒绝了"+spec.name+"的生成请求，请检查首帧素材和提示词。"});
       if (response.status === 429) return reply(429,{error:"千问平台请求过多，请稍后再试。"});
       if (!response.ok || typeof output?.task_id !== "string" || !taskId.test(output.task_id)) {
         return reply(502,{error:"未能确认任务是否提交。请先到千问平台核对任务和用量。"});

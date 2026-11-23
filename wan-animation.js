@@ -3,6 +3,7 @@
   const messages = new WeakMap();
   const externalDownloads = new WeakMap();
   let enabled = false;
+  let models = [];
   let accessCheck = 0;
 
   async function animationRequest(body) {
@@ -18,6 +19,34 @@
     return !demoImage(shot.image) && /^data:image\/(?:png|jpeg|webp);base64,/.test(shot.image || "");
   }
 
+  function selectField(labelText, options, selectedValue, disabled, onChange) {
+    const label = document.createElement("label");
+    label.className = "field";
+    label.append(labelText);
+    const select = document.createElement("select");
+    select.disabled = disabled;
+    select.replaceChildren(...options.map(([value,text])=>new Option(text,value)));
+    select.value = selectedValue;
+    select.onchange = () => onChange(select.value);
+    label.append(select);
+    return label;
+  }
+
+  function settingsFor(shot) {
+    const saved = shot.animationSettings;
+    const model = models.find(item=>item.id === saved?.model) ?? models[0];
+    const resolution = typeof saved?.resolution === "string" && Object.hasOwn(model.price,saved.resolution)
+      ? saved.resolution : Object.keys(model.price)[0];
+    const planned = shot.wanJob && !saved ? 5 : Math.round(shot.seconds) || 5;
+    const duration = Math.max(model.min,Math.min(model.max,Number.isInteger(saved?.duration) ? saved.duration : planned));
+    const audio = model.price[resolution].length > 1 && saved?.audio === true;
+    return {model:model.id,resolution,duration,audio};
+  }
+
+  function estimatedCost(model, settings) {
+    return (model.price[settings.resolution][Number(settings.audio)] * settings.duration / 100).toFixed(2);
+  }
+
   function renderAnimation() {
     workspace.querySelector("[data-wan-animation]")?.remove();
     const tools = workspace.querySelector(".video-tools");
@@ -29,10 +58,36 @@
     const label = document.createElement("div");
     label.className = "field";
     const title = document.createElement("span");
-    title.textContent = "站内生成动画 · 万相 2.2 Flash";
+    title.textContent = "站内生成动画";
+    const settings = settingsFor(shot);
+    const model = models.find(item=>item.id === settings.model);
+    const locked = running.has(shot) || Boolean(shot.wanJob);
+    const change = (key, value) => {
+      shot.animationSettings = key === "model" ? {model:value} : {...settings,[key]:value};
+      void save();
+      renderAnimation();
+      workspace.querySelector('[data-wan-setting="' + key + '"] select')?.focus();
+    };
+    const addField = (key,text,options,disabled = false) => {
+      const field = selectField(text,options,String(settings[key]),locked || disabled,value=>change(key,
+        key === "duration" ? Number(value) : key === "audio" ? value === "true" : value));
+      field.dataset.wanSetting = key;
+      label.append(field);
+    };
+    label.append(title);
+    addField("model","视频生成模型",models.map(item=>[item.id,item.name]));
+    addField("resolution","视频分辨率",Object.keys(model.price).map(value=>[value,value]));
+    addField("duration","动画时长",Array.from({length:model.max-model.min+1},(_,i)=>{
+      const seconds = model.min + i;
+      return [String(seconds),seconds + " 秒"];
+    }),model.min === model.max);
+    if (model.price[settings.resolution].length > 1) {
+      addField("audio","模型声音",[["false","无声"],["true","生成声音"]]);
+    }
     const info = document.createElement("small");
-    info.textContent = "480p · 5 秒 · 无声 · 模型按量价约 ¥0.50／段";
-    label.append(title,info);
+    info.textContent = settings.resolution + " · " + settings.duration + " 秒 · " +
+      (settings.audio ? "有声" : "无声") + " · 模型按量价约 ¥" + estimatedCost(model,settings) + "／段";
+    label.append(info);
     const actions = document.createElement("div");
     actions.className = "actions";
     const generate = document.createElement("button");
@@ -67,22 +122,27 @@
     tools.before(panel);
   }
 
-  function animationPrompt(shot) {
+  function animationPrompt(shot, settings, limit) {
     const parts = [
       "以上传图为首帧，镜头连续。保持人物五官、服装、站位、道具位置和光线一致。",
       shot.direction?.trim() || "人物只完成一个符合当前画面的小动作，视线和手部动作自然。",
+      settings.audio && shot.line?.trim() ? "对白与旁白逐字使用以下原文：\n" + shot.line.trim() : "",
       "运镜：" + (movementOptions[shot.motion]?.prompt || "保持原机位。"),
       "按首帧构图，动作自然收住，避免突然变景、跳位和肢体变形。"
     ];
-    return Array.from(parts.join("\n")).slice(0,800).join("");
+    return Array.from(parts.filter(Boolean).join("\n")).slice(0,limit).join("");
   }
 
   async function animate(shot) {
     if (running.has(shot)) return;
     const originalVideo = shot.video;
     const originalImage = shot.image;
+    const settings = settingsFor(shot);
+    const model = models.find(item=>item.id === settings.model);
     if (!shot.wanJob && (!canAnimate(shot) ||
-        !window.confirm("将本镜首帧和画面动作发送给千问平台，生成 5 秒动画，模型费用约 ¥0.50。"
+        !window.confirm("用" + model.name + "生成 " + settings.resolution + "、" + settings.duration +
+          " 秒动画，模型费用约 ¥" + estimatedCost(model,settings) + "。会将本镜首帧和画面动作" +
+          (settings.audio && shot.line?.trim() ? "及对白" : "") + "发送给千问平台。"
           + (originalVideo ? "生成成功后将替换本镜现有视频。" : "") + "确认生成？"))) return;
     const report = message => {
       messages.set(shot,message);
@@ -92,9 +152,11 @@
     report(shot.wanJob ? "正在查询任务…" : "正在提交首帧…");
     try {
       if (!shot.wanJob) {
-        const response = await animationRequest({action:"create",image:originalImage,prompt:animationPrompt(shot)});
+        const response = await animationRequest({action:"create",image:originalImage,
+          prompt:animationPrompt(shot,settings,model.promptLimit),...settings});
         const {job} = await response.json();
         if (!project.shots.includes(shot)) return;
+        shot.animationSettings = settings;
         shot.wanJob = job;
         await save();
       }
@@ -180,7 +242,8 @@
       if (version !== accessCheck) return;
       const data = await result.json();
       if (version !== accessCheck) return;
-      enabled = data.enabled === true;
+      models = Array.isArray(data.models) ? data.models : [];
+      enabled = data.enabled === true && models.length > 0;
       renderAnimation();
     } catch { /* Animation is shown only to the pilot administrator. */ }
   }

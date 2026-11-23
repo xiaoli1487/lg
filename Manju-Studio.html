@@ -655,11 +655,11 @@ async function roleCommand(command, id) {
     actions.before(note);
     return;
   }
-  if (!window.confirm("把此角色参考图发给选定的绘图平台 生成三视图？此次生成按你的 API 账户计费。")) return;
+  if (!window.confirm("把此角色参考图发给选定的绘图平台 生成三视图？" + generationFee("/three-view"))) return;
   generatingRoles.add(id);
   render();
   try {
-    const response = await fetch("/three-view", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...modelRoute("image"),image:role.image,prompt})});
+    const response = await requestGeneration("/three-view", {...modelRoute("image"),image:role.image,prompt});
     const result = await response.json();
     if (!response.ok || !result.image) throw new Error(result.error || "生成失败");
     role.sheet = result.image;
@@ -882,7 +882,7 @@ async function drawMissingShots() {
   const board = project.shots;
   const missing = board.filter(shot => needsArtwork(shot) && !drawingShots.has(shot));
   if (!missing.length) { notify("每一镜都已有素材。"); return; }
-  if (!window.confirm("为 " + missing.length + " 个镜头各生成一张图？将发送脚本和绑定的参考图，按 API 用量计费。")) return;
+  if (!window.confirm("为 " + missing.length + " 个镜头各生成一张图？将发送脚本和绑定的参考图，" + generationFee("/shot-image",missing.length))) return;
   const job = {index:0,count:missing.length,done:0,failed:0,stop:false};
   batchJob = job;
   try {
@@ -932,14 +932,14 @@ async function drawShot(shot, batch = false) {
     $("#copy-dialog").append(panel);
     return;
   }
-  if (!batch && !window.confirm("根据本镜脚本生成一张新图？将发送脚本和已绑定的角色图，使用你的图像 API 额度。")) return;
+  if (!batch && !window.confirm("根据本镜脚本生成一张新图？将发送脚本和已绑定的角色图，" + generationFee("/shot-image"))) return;
   drawingErrors.delete(shot);
   drawingShots.add(shot);
   const previousImage = shot.image;
   const previousVideo = shot.video;
   render();
   try {
-    const response = await fetch("/shot-image",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...modelRoute("image"),prompt,refs})});
+    const response = await requestGeneration("/shot-image", {...modelRoute("image"),prompt,refs});
     const result = await response.json();
     if (!response.ok || !result.image) {
       const error = new Error(result.error || "未收到分镜图。");
@@ -1003,11 +1003,28 @@ function stylePicker() {
 }
 
 const tabKeys = new Map();
+const creditProvider = document.documentElement.dataset.creditProvider;
+function generationFee(route, count = 1) {
+  if (!creditProvider) return "按你的 API 用量计费。";
+  const cost = document.documentElement.getAttribute("data-cost-" + route.slice(1));
+  const total = Math.round(Number(cost) * 10) * count / 10;
+  return "最多消耗 " + total + " 积分，模型生成失败会退回该次积分。";
+}
+async function requestGeneration(route, body) {
+  const headers = {"Content-Type":"application/json"};
+  if (creditProvider) {
+    if (!window.manjuAccountToken) throw Error("登录组件正在加载，请稍后再试。");
+    headers.Authorization = "Bearer " + await window.manjuAccountToken();
+  }
+  return fetch(route,{method:"POST",headers,body:JSON.stringify(body)});
+}
 function modelRoute(kind) {
+  if (creditProvider) return {provider:creditProvider};
   const a = project.author;
   return {key:tabKeys.get(a[kind+"Provider"] || "openai"),provider:a[kind+"Provider"] || "openai",workspace:(a.qwenWorkspace || "").trim(),region:a.qwenRegion || "cn-beijing"};
 }
 function modelSettings() {
+  if (creditProvider) return "";
   if (!hasLocalService()) return "";
   const a = project.author;
   const images = {openai:"OpenAI",qwen:"千问（阿里云百炼）",qwenpay:"千问AI平台（按量付费）"};
@@ -1322,7 +1339,7 @@ function similarActions(left,right) {
   return 2*overlap/Math.max(1,a.size+b.size) >= .86;
 }
 async function onlineScreenplay(prompt, withImages = false) {
-  if (writingOnline || !window.confirm("将本次点子、角色名和场景发给选定的文本模型写剧本？此操作按 API 账户计费。")) return;
+  if (writingOnline || !window.confirm("将本次点子、角色名和场景发给选定的文本模型写剧本？" + generationFee("/write-story"))) return;
   writingOnline = true;
   updateWritingButtons(true);
   const before = project.screenplay;
@@ -1334,7 +1351,7 @@ async function onlineScreenplay(prompt, withImages = false) {
   void save();
   notify("正在创作剧本，请稍候。");
   try {
-    const response = await fetch("/write-story", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({...modelRoute("text"),prompt})});
+    const response = await requestGeneration("/write-story", {...modelRoute("text"),prompt});
     const data = await response.json();
     if (!response.ok || !data.screenplay) throw new Error(data.error || "剧本生成失败");
     if (project!==owner || project.screenplay !== before || project.author.idea !== idea) { showText("生成的剧本", data.screenplay); return; }

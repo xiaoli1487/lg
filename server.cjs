@@ -5,6 +5,28 @@ function runCharacterServer() {
   const path = require("node:path");
   const port = Number(process.env.PORT || 10000);
   const origin = new URL(process.env.RENDER_EXTERNAL_URL).origin;
+  const authEnabled = Boolean(process.env.FIREBASE_WEB_API_KEY && process.env.FIREBASE_PROJECT_ID);
+  const creditMode = process.env.MANJU_CREDITS === "1";
+  const vars = {openai:"OPENAI_API_KEY",deepseek:"DEEPSEEK_API_KEY",qwen:"DASHSCOPE_API_KEY",qwenpay:"QIANWEN_API_KEY"};
+  const managedProvider = process.env.MANJU_MODEL_PROVIDER || "qwenpay";
+  const creditAdmin = process.env.MANJU_CREDIT_ADMIN_UID;
+  let credits;
+  if (creditMode) {
+    const costs = {
+      "/write-story":Number(process.env.MANJU_STORY_COST ?? "9.2"),
+      "/shot-image":Number(process.env.MANJU_IMAGE_COST ?? "9.2"),
+      "/three-view":Number(process.env.MANJU_SHEET_COST ?? "9.2")
+    };
+    if (!authEnabled || !["qwenpay","openai"].includes(managedProvider) || !process.env[vars[managedProvider]]) {
+      throw new Error("积分模式配置不完整。");
+    }
+    const {initializeApp,cert} = require("firebase-admin/app");
+    const {getAuth} = require("firebase-admin/auth");
+    const {getFirestore} = require("firebase-admin/firestore");
+    const credential = cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
+    const app = initializeApp({credential,projectId:process.env.FIREBASE_PROJECT_ID});
+    credits = require("./credits.cjs").createCredits(getAuth(app),getFirestore(app),costs);
+  }
   const accountErrors = {
     401: "密钥验证失败。请在网站的模型设置中填写该平台的完整 API Key。",
     403: "平台拒绝了访问。请核对密钥所属平台，并查看该密钥能否调用此模型。",
@@ -13,12 +35,33 @@ function runCharacterServer() {
   const html = path.join(__dirname, "Manju-Studio.html");
   if (!fs.existsSync(html)) throw new Error("请把启动器和 Manju-Studio.html 放在同一文件夹。");
   http.createServer(async (req, res) => {
-    const reply = (code, body) => {
+    let settle;
+    const reply = async (code, body) => {
+      if (settle) {
+        try { await settle(code === 200); }
+        catch {
+          console.error("积分流水结算失败");
+          code = 503;
+          body = {error:"积分结算失败，请联系站点管理员核对流水。",blocked:true};
+        }
+      }
       res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(body));
     };
     if (req.headers.host !== new URL(origin).host) return reply(403, {});
-    const authEnabled = Boolean(process.env.FIREBASE_WEB_API_KEY && process.env.FIREBASE_PROJECT_ID);
+    if (credits && req.method === "GET" && req.url === "/credits") {
+      try {
+        const uid = await credits.identify(req);
+        return reply(200,{
+          ...await credits.overview(uid),
+          costs:credits.costs,
+          packages:credits.packages,
+          manualAdmin:uid===creditAdmin,
+          rechargeContact:creditAdmin ? process.env.MANJU_RECHARGE_CONTACT?.trim() || "" : ""
+        });
+      }
+      catch (error) { return reply(error.status || 503,{error:error.status ? error.message : "暂时无法查询积分。"}); }
+    }
     if (authEnabled && req.method === "GET" && req.url === "/account.js") {
       res.writeHead(200, {"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
       return fs.createReadStream(path.join(__dirname,"account.js")).pipe(res);
@@ -30,28 +73,36 @@ function runCharacterServer() {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "X-Manju-Process": String(process.pid) });
       
       let page = fs.readFileSync(html, "utf8").replaceAll("http://127.0.0.1:8793", origin);
+      if (credits) {
+        const encodedCosts = Object.entries(credits.costs).map(([route,cost])=>' data-cost-'+route.slice(1)+'="'+cost+'"').join("");
+        page = page.replace("<html lang=\"zh-CN\">", '<html lang="zh-CN" data-credit-provider="' + managedProvider + '"' + encodedCosts + '>');
+      }
       if (authEnabled) page = page.replace("</head>", '<script type="module" src="/account.js"></script></head>');
       return res.end(page);
     }
-    if (req.method !== "POST" || !["/three-view", "/shot-image", "/write-story"].includes(req.url) || req.headers.origin !== origin) return reply(403, {});
+    const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
+    if (req.method !== "POST" || (!manualPayment && !["/three-view", "/shot-image", "/write-story"].includes(req.url)) || req.headers.origin !== origin) return reply(403, {});
     try {
+      const uid = credits && await credits.identify(req);
+      if (manualPayment && uid !== creditAdmin) return reply(403,{error:"此操作需要积分管理员权限。"});
       const chunks = [];
       let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > 16 * 1024 * 1024) return reply(413, { error: "参考图过大，请缩小后再试。" });
+        if (size > (manualPayment ? 4096 : 16 * 1024 * 1024)) return reply(413, { error: "提交内容过大。" });
         chunks.push(chunk);
       }
       const data = JSON.parse(Buffer.concat(chunks).toString());
-      const { image, prompt, refs = [], provider = "openai" } = data;
-      const vars = {openai:"OPENAI_API_KEY",deepseek:"DEEPSEEK_API_KEY",qwen:"DASHSCOPE_API_KEY",qwenpay:"QIANWEN_API_KEY"};
+      if (manualPayment) return reply(200,await credits.addManualPayment(uid,data));
+      const { image, prompt, refs = [] } = data;
+      const provider = credits ? managedProvider : data.provider || "openai";
       if (!Object.hasOwn(vars,provider)) return reply(400,{error:"请选择支持的平台。"});
       const platform = {openai:"OpenAI",deepseek:"DeepSeek",qwen:"阿里云百炼",qwenpay:"千问按量付费"}[provider];
       const model = req.url === "/write-story"
         ? {openai:"gpt-4.1-mini",deepseek:"deepseek-flash",qwen:"qwen-plus",qwenpay:"qwen-plus"}[provider]
         : provider === "openai" ? "gpt-image-1.5" : "qwen-image-3.0";
-      const accountFailure = status => reply(502, {error:platform+"（"+model+"，HTTP "+status+"）"+accountErrors[status], blocked:true});
-      const key = typeof data.key === "string" && /^\S{8,512}$/.test(data.key) ? data.key : "";
+      const accountFailure = status => reply(502, {error:credits ? "网站的模型服务暂不可用，请稍后再试。" : platform+"（"+model+"，HTTP "+status+"）"+accountErrors[status], blocked:true});
+      const key = credits ? process.env[vars[provider]] : typeof data.key === "string" && /^\S{8,512}$/.test(data.key) ? data.key : "";
       if (!key) return reply(400,{error:"请在模型设置里填写 "+provider+" 的 API Key。",blocked:true});
       let base = "https://api.openai.com/v1";
       if (provider === "deepseek") base = "https://api.deepseek.com";
@@ -62,6 +113,7 @@ function runCharacterServer() {
       }
       if (req.url === "/write-story") {
         if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 12000) return reply(400, {error:"故事输入过长或为空。"});
+        if (credits) settle = await credits.reserve(uid,req.url);
         const response = await fetch(base+"/chat/completions", {
           method:"POST", redirect:"error", headers:{Authorization:"Bearer " + key, "Content-Type":"application/json"},
           body:JSON.stringify({model, messages:[{role:"user",content:prompt}]}),
@@ -70,7 +122,7 @@ function runCharacterServer() {
         if (accountErrors[response.status]) return accountFailure(response.status);
         const result = await response.json();
         const screenplay = result.choices?.[0]?.message?.content;
-        if (!response.ok || !screenplay) return reply(502, {error:result.error?.message || "没有收到剧本。"});
+        if (!response.ok || !screenplay) return reply(502, {error:!credits && result.error?.message || "没有收到剧本。"});
         return reply(200, {screenplay});
       }
       const inputs = req.url === "/shot-image" ? refs : [image];
@@ -95,16 +147,17 @@ function runCharacterServer() {
         headers["Content-Type"] = "application/json";
         body = JSON.stringify(parameters);
       }
+      if (credits) settle = await credits.reserve(uid,req.url);
       const response = await fetch(base+"/images/" + (provider==="openai" && inputs.length ? "edits" : "generations"), {
         method:"POST", redirect:"error", headers, body,
         signal:AbortSignal.timeout(300000)
       });
       if (accountErrors[response.status]) return accountFailure(response.status);
       const result = await response.json();
-      if (!response.ok || !result.data?.[0]?.b64_json) return reply(502, { error: result.error?.message || "图像服务没有返回图片。" });
-      reply(200, { image: "data:image/png;base64," + result.data[0].b64_json });
-    } catch {
-      reply(500, { error: "生成失败。请检查网络和参考图，再重试。" });
+      if (!response.ok || !result.data?.[0]?.b64_json) return reply(502, { error: !credits && result.error?.message || "图像服务没有返回图片。" });
+      return reply(200, { image: "data:image/png;base64," + result.data[0].b64_json });
+    } catch (error) {
+      return reply(error.status || 500, { error: error.status ? error.message : "生成失败。请检查网络和参考图，再重试。", blocked:Boolean(error.status) });
     }
   }).on("error", error => { console.error(error.message); process.exit(error.code === "EADDRINUSE" ? 98 : 1); }).listen(port, "0.0.0.0", () => console.log("打开 " + origin));
 }

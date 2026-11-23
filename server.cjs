@@ -5,7 +5,10 @@ function runCharacterServer() {
   const path = require("node:path");
   const port = Number(process.env.PORT || 10000);
   const origin = new URL(process.env.RENDER_EXTERNAL_URL).origin;
-  const authEnabled = Boolean(process.env.FIREBASE_WEB_API_KEY && process.env.FIREBASE_PROJECT_ID);
+  const supabaseUrl = process.env.SUPABASE_URL?.replace(/\/$/,"");
+  const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+  const supabaseAuth = Boolean(supabaseUrl && supabaseKey);
+  const authEnabled = supabaseAuth || Boolean(process.env.FIREBASE_WEB_API_KEY && process.env.FIREBASE_PROJECT_ID);
   const creditMode = process.env.MANJU_CREDITS === "1";
   const vars = {openai:"OPENAI_API_KEY",deepseek:"DEEPSEEK_API_KEY",qwen:"DASHSCOPE_API_KEY",qwenpay:"QIANWEN_API_KEY"};
   const managedProvider = process.env.MANJU_MODEL_PROVIDER || "qwenpay";
@@ -20,12 +23,18 @@ function runCharacterServer() {
     if (!authEnabled || !["qwenpay","openai"].includes(managedProvider) || !process.env[vars[managedProvider]]) {
       throw new Error("积分模式配置不完整。");
     }
-    const {initializeApp,cert} = require("firebase-admin/app");
-    const {getAuth} = require("firebase-admin/auth");
-    const {getFirestore} = require("firebase-admin/firestore");
-    const credential = cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
-    const app = initializeApp({credential,projectId:process.env.FIREBASE_PROJECT_ID});
-    credits = require("./credits.cjs").createCredits(getAuth(app),getFirestore(app),costs);
+    if (supabaseAuth) {
+      const secret = process.env.SUPABASE_SECRET_KEY;
+      if (!secret) throw new Error("Supabase 积分模式缺少后台凭据。");
+      credits = require("./supabase-credits.cjs").createSupabaseCredits(supabaseUrl,supabaseKey,secret,costs);
+    } else {
+      const {initializeApp,cert} = require("firebase-admin/app");
+      const {getAuth} = require("firebase-admin/auth");
+      const {getFirestore} = require("firebase-admin/firestore");
+      const credential = cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
+      const app = initializeApp({credential,projectId:process.env.FIREBASE_PROJECT_ID});
+      credits = require("./credits.cjs").createCredits(getAuth(app),getFirestore(app),costs);
+    }
   }
   const accountErrors = {
     401: "密钥验证失败。请在网站的模型设置中填写该平台的完整 API Key。",
@@ -67,6 +76,7 @@ function runCharacterServer() {
       return fs.createReadStream(path.join(__dirname,"account.js")).pipe(res);
     }
     if (authEnabled && req.method === "GET" && req.url === "/auth-config") {
+      if (supabaseAuth) return reply(200,{provider:"supabase",url:supabaseUrl,publishableKey:supabaseKey});
       return reply(200,{apiKey:process.env.FIREBASE_WEB_API_KEY,projectId:process.env.FIREBASE_PROJECT_ID,authDomain:process.env.FIREBASE_PROJECT_ID+".firebaseapp.com"});
     }
     if (req.method === "GET" && req.url === "/") {

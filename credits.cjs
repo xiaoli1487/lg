@@ -88,4 +88,4 @@ function createCredits(auth, db, costs) {
   return {identify,overview,reserve,addManualPayment,costs,packages};
 }
 
-module.exports = {createCredits};
+module.exports = {createCredits,packages,creditError};

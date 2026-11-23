@@ -67,18 +67,18 @@ const packageLabel = pack => (pack.firstOnly ? "首充 · " : "") +
 function display(next) {
   mode = next;
   const account = mode === "account";
-  const secret = mode === "login" || mode === "register";
+  const secret = mode === "login" || mode === "register" || mode === "recovery";
   password.value = "";
   password.disabled = !secret;
-  password.autocomplete = mode === "register" ? "new-password" : "current-password";
-  password.minLength = mode === "register" ? 8 : 1;
-  email.disabled = account;
-  email.parentElement.hidden = account;
+  password.autocomplete = ["register","recovery"].includes(mode) ? "new-password" : "current-password";
+  password.minLength = password.autocomplete === "new-password" ? 8 : 1;
+  email.disabled = account || mode === "recovery";
+  email.parentElement.hidden = email.disabled;
   password.parentElement.hidden = !secret;
-  const titles = {login:"登录工坊",register:"注册工坊账号",reset:"找回密码",account:"我的账号"};
+  const titles = {login:"登录工坊",register:"注册工坊账号",reset:"找回密码",recovery:"设置新密码",account:"我的账号"};
   form.querySelector("h2").textContent = titles[mode];
-  submit.textContent = {login:"登录",register:"注册",reset:"发送重置邮件",account:"退出登录"}[mode];
-  change.hidden = account;
+  submit.textContent = {login:"登录",register:"注册",reset:"发送重置邮件",recovery:"保存新密码",account:"退出登录"}[mode];
+  change.hidden = account || mode === "recovery";
   change.textContent = mode === "login" ? "注册账号" : "返回登录";
   reset.hidden = mode !== "login";
   status.textContent = account ? auth.currentUser?.email || "" : "";
@@ -186,11 +186,55 @@ rechargeForm.onsubmit = async event => {
 };
 
 async function initialize() {
-  const url = "https://www.gstatic.com/firebasejs/12.6.0/";
-  const [app,api,response] = await Promise.all([import(url+"firebase-app.js"),import(url+"firebase-auth.js"),fetch("/auth-config")]);
+  const response = await fetch("/auth-config");
   if (!response.ok) throw Error();
+  const config = await response.json();
+  if (config.provider === "supabase") {
+    const {createClient} = await import("https://esm.sh/@supabase/supabase-js@2.119.0?bundle");
+    const client = createClient(config.url,config.publishableKey);
+    const unwrap = async call => {
+      const {data,error} = await call;
+      if (error) throw error;
+      return data;
+    };
+    const update = session => {
+      auth.currentUser = session?.user ? {
+        uid:session.user.id, email:session.user.email,
+        getIdToken:async () => {
+          const current = (await unwrap(client.auth.getSession())).session;
+          if (current?.user.id !== session.user.id) throw Error("请重新登录。");
+          return current.access_token;
+        }
+      } : null;
+      entry.textContent = auth.currentUser ? "我的账号" : "注册 / 登录";
+    };
+    const redirectTo = location.origin + "/";
+    auth = {currentUser:null};
+    sdk = {
+      async signOut() { await unwrap(client.auth.signOut()); update(null); },
+      async signInWithEmailAndPassword(_,email,password) {
+        update((await unwrap(client.auth.signInWithPassword({email,password}))).session);
+      },
+      async createUserWithEmailAndPassword(_,email,password) {
+        update((await unwrap(client.auth.signUp({email,password,options:{emailRedirectTo:redirectTo}}))).session);
+      },
+      async sendPasswordResetEmail(_,email) { await unwrap(client.auth.resetPasswordForEmail(email,{redirectTo})); },
+      async updatePassword(password) { await unwrap(client.auth.updateUser({password})); }
+    };
+    client.auth.onAuthStateChange((event,session)=>setTimeout(()=>{
+      update(session);
+      if (event === "PASSWORD_RECOVERY") {
+        if (!dialog.open) dialog.showModal();
+        display("recovery");
+      } else if (event === "SIGNED_OUT" && dialog.open && mode === "account") display("login");
+    },0));
+    update((await unwrap(client.auth.getSession())).session);
+    return;
+  }
+  const url = "https://www.gstatic.com/firebasejs/12.6.0/";
+  const [app,api] = await Promise.all([import(url+"firebase-app.js"),import(url+"firebase-auth.js")]);
   sdk = api;
-  auth = sdk.getAuth(app.initializeApp(await response.json()));
+  auth = sdk.getAuth(app.initializeApp(config));
   auth.languageCode = "zh-CN";
   await auth.authStateReady();
   sdk.onAuthStateChanged(auth,user=>{
@@ -226,10 +270,12 @@ form.onsubmit = async event => {
     await init();
     if (mode === "account") { await sdk.signOut(auth); display("login"); status.textContent="已退出登录。"; }
     else if (mode === "reset") { await sdk.sendPasswordResetEmail(auth,email.value.trim()); status.textContent="如该邮箱已注册，请查收重置邮件。"; }
+    else if (mode === "recovery") { await sdk.updatePassword(password.value); display("account"); }
     else {
       const action = mode === "register" ? sdk.createUserWithEmailAndPassword : sdk.signInWithEmailAndPassword;
       await action(auth,email.value.trim(),password.value);
-      display("account");
+      display(auth.currentUser ? "account" : "login");
+      if (!auth.currentUser) status.textContent = "请查收验证邮件，验证邮箱后登录。";
     }
   } catch (error) {
     status.textContent = ({"auth/too-many-requests":"操作频繁，请稍后重试。","auth/email-already-in-use":"邮箱已注册，请登录或找回密码。","auth/weak-password":"密码强度不足，请换一个密码。","auth/invalid-credential":"邮箱或密码有误。","auth/network-request-failed":"连接失败，请检查网络。"})[error.code] || "账号操作失败，请稍后重试。";

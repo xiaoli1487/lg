@@ -56,7 +56,9 @@ function runCharacterServer() {
   const layoutFiles = {
     "/studio-layout.css":["studio-layout.css","text/css; charset=utf-8"],
     "/studio-layout.js":["studio-layout.js","text/javascript; charset=utf-8"],
-    "/shot-image-picker.js":["shot-image-picker.js","text/javascript; charset=utf-8"]
+    "/shot-image-picker.js":["shot-image-picker.js","text/javascript; charset=utf-8"],
+    "/infinite-canvas.css":["infinite-canvas.css","text/css; charset=utf-8"],
+    "/infinite-canvas.js":["infinite-canvas.js","text/javascript; charset=utf-8"]
   };
   http.createServer(async (req, res) => {
     let settle;
@@ -134,7 +136,8 @@ function runCharacterServer() {
           JSON.stringify({models:shotImages.options,defaultId:shotImages.defaultId}) +
           '</script><script defer src="/shot-image-picker.js"></script>'
         : '';
-      return res.end(page.replace("</head>",layout + imagePicker + "</head>"));
+      const canvas = '<link rel="stylesheet" href="/infinite-canvas.css"><script defer src="/infinite-canvas.js"></script>';
+      return res.end(page.replace("</head>",layout + imagePicker + canvas + "</head>"));
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
     const invite = Boolean(credits) && inviteOnly && req.url === "/credits/invite";

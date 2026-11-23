@@ -1,5 +1,6 @@
 const { randomBytes, randomUUID } = require("node:crypto");
 const { packages, creditError } = require("./credits.cjs");
+const isUuid = value => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 
 function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = false, administrator} = {}) {
   if (!Object.values(costs).every(cost => Number.isSafeInteger(cost * 10) && cost > 0)) {
@@ -37,7 +38,7 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
   async function invite(input) {
     const resetUid = input?.resetUid;
     if (resetUid !== undefined) {
-      if (typeof resetUid !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(resetUid) || resetUid === administrator) {
+      if (!isUuid(resetUid) || resetUid === administrator) {
         throw creditError(400,"请输入客户账号编号。");
       }
       const path = "/auth/v1/admin/users/" + resetUid;
@@ -83,7 +84,7 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
   async function addManualPayment(administrator, input) {
     const {uid,channel,transactionId,amountFen,packageId} = input || {};
     const pack = packages.find(item=>item.id === packageId);
-    if (typeof uid !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(uid) ||
+    if (!isUuid(uid) ||
         !["wechat","alipay"].includes(channel) || typeof transactionId !== "string" ||
         !/^[A-Za-z0-9_-]{8,80}$/.test(transactionId) || !pack || amountFen !== pack.amountFen) {
       throw creditError(400,"请核对账号、交易单号和套餐实收金额。");
@@ -97,7 +98,23 @@ function createSupabaseCredits(url, publicKey, secret, costs, {inviteOnly = fals
     if (result === "invalid_user") throw creditError(404,"该账号不存在。");
     throw creditError(409,"这笔交易已经入账，请核对原记录。");
   }
-  return {identify,invite,overview:uid=>rpc("wallet",{p_uid:uid}),reserve,addManualPayment,costs,packages};
+  async function addGift(administrator, input) {
+    const {uid, points, requestId} = input || {};
+    const note = typeof input?.note === "string" ? input.note.trim() : "";
+    const units = typeof points === "number" ? Math.round(points * 10) : NaN;
+    if (!isUuid(uid) || !isUuid(requestId) || units / 10 !== points ||
+        units <= 0 || units > 2147483647 || !note || note.length > 200 || note.includes("\0")) {
+      throw creditError(400,"请核对账号编号、积分数（最多一位小数）和赠送备注。");
+    }
+    const result = await rpc("gift",{
+      p_id:requestId, p_uid:uid, p_admin:administrator, p_units:units, p_note:note
+    });
+    if (result === "credited" || result === "duplicate") return {points, alreadyRecorded:result === "duplicate"};
+    if (result === "invalid_user") throw creditError(404,"该账号不存在，请核对账号编号。");
+    if (result === "conflict") throw creditError(409,"赠送请求与原记录不符，请核对后重试。");
+    throw new Error("无法确认赠送结果。");
+  }
+  return {identify,invite,overview:uid=>rpc("wallet",{p_uid:uid}),reserve,addManualPayment,addGift,costs,packages};
 }
 
 module.exports = {createSupabaseCredits};

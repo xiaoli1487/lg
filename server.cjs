@@ -70,6 +70,7 @@ function runCharacterServer() {
           costs:credits.costs,
           packages:credits.packages,
           manualAdmin:uid===creditAdmin,
+          giftAdmin:supabaseAuth && uid===creditAdmin,
           inviteAdmin:inviteOnly && uid===creditAdmin,
           rechargeContact:creditAdmin ? process.env.MANJU_RECHARGE_CONTACT?.trim() || "" : ""
         });
@@ -97,19 +98,22 @@ function runCharacterServer() {
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
     const invite = Boolean(credits) && inviteOnly && req.url === "/credits/invite";
-    if (req.method !== "POST" || (!manualPayment && !invite && !["/three-view", "/shot-image", "/write-story"].includes(req.url)) || req.headers.origin !== origin) return reply(403, {});
+    const gift = Boolean(credits) && supabaseAuth && req.url === "/credits/gift";
+    const adminAction = manualPayment || invite || gift;
+    if (req.method !== "POST" || (!adminAction && !["/three-view", "/shot-image", "/write-story"].includes(req.url)) || req.headers.origin !== origin) return reply(403, {});
     try {
       const uid = credits && await credits.identify(req);
-      if ((manualPayment || invite) && uid !== creditAdmin) return reply(403,{error:"此操作需要积分管理员权限。"});
+      if (adminAction && uid !== creditAdmin) return reply(403,{error:"此操作需要积分管理员权限。"});
       const chunks = [];
       let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > (manualPayment || invite ? 4096 : 16 * 1024 * 1024)) return reply(413, { error: "提交内容过大。" });
+        if (size > (adminAction ? 4096 : 16 * 1024 * 1024)) return reply(413, { error: "提交内容过大。" });
         chunks.push(chunk);
       }
       const data = JSON.parse(Buffer.concat(chunks).toString());
       if (invite) return reply(200,await credits.invite(data));
+      if (gift) return reply(200,await credits.addGift(uid,data));
       if (manualPayment) return reply(200,await credits.addManualPayment(uid,data));
       const { image, prompt, refs = [] } = data;
       const provider = credits ? managedProvider : data.provider || "openai";

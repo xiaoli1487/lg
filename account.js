@@ -53,6 +53,20 @@ const buyerPack = rechargePanel.querySelector("select");
 const copyRecharge = rechargePanel.querySelector("[data-copy-recharge]");
 const rechargeText = rechargePanel.querySelector("textarea");
 const copyStatus = rechargePanel.querySelector('[role="status"]');
+const giftForm = document.createElement("form");
+giftForm.hidden = true;
+giftForm.className = "inspector-body";
+giftForm.innerHTML = `
+  <h3>赠送积分</h3>
+  <label class="field">客户账号编号（User UID）<input name="uid" required minlength="36" maxlength="36" spellcheck="false"></label>
+  <label class="field">赠送积分数<input name="points" required type="number" min="0.1" max="214748364.7" step="0.1"></label>
+  <label class="field">赠送备注<input name="note" required maxlength="200" placeholder="例如：试运营测试"></label>
+  <button class="button primary" type="submit">确认赠送</button>
+  <p role="status"></p>`;
+dialog.append(giftForm);
+const giftStatus = giftForm.querySelector('[role="status"]');
+const giftSubmit = giftForm.querySelector('button[type="submit"]');
+const pendingGifts = new Map();
 const rechargeForm = document.createElement("form");
 rechargeForm.hidden = true;
 rechargeForm.className = "inspector-body";
@@ -79,7 +93,7 @@ inviteForm.innerHTML = `
     <button class="button secondary" type="button" data-reset-invite>生成新密码</button>
   </details>
   <p role="status"></p>
-  <textarea readonly hidden rows="4" style="width:100%" aria-label="账号登录信息"></textarea>
+  <textarea readonly hidden rows="5" style="width:100%" aria-label="账号登录信息"></textarea>
   <button class="button secondary" type="button" data-copy-invite hidden>复制登录信息</button>`;
 dialog.append(inviteForm);
 const inviteStatus = inviteForm.querySelector('[role="status"]');
@@ -127,10 +141,13 @@ function display(next) {
   rechargeText.hidden = true;
   rechargeText.value = "";
   copyStatus.textContent = "";
+  giftForm.hidden = true;
   rechargeForm.hidden = true;
   inviteForm.hidden = true;
   if (inviteOnly && mode === "login") status.textContent = "试运营仅向受邀账号开放。忘记密码请联系管理员。";
   if (!account) {
+    giftForm.reset();
+    giftStatus.textContent = "";
     rechargeForm.reset();
     rechargeStatus.textContent = "";
   }
@@ -187,6 +204,7 @@ async function refreshCredits() {
         new Option("请选择客户购买的套餐",""),
         ...packages.map(pack=>new Option(packageLabel(pack),pack.id))
       );
+      giftForm.hidden = !data.giftAdmin;
       rechargeForm.hidden = !data.manualAdmin;
       inviteForm.hidden = !data.inviteAdmin;
     }
@@ -199,6 +217,52 @@ async function refreshCredits() {
     clearTimeout(timer);
   }
 }
+
+giftForm.onsubmit = async event => {
+  event.preventDefault();
+  const administrator = auth?.currentUser;
+  if (!administrator || giftForm.hidden || giftSubmit.disabled) return;
+  const fields = new FormData(giftForm);
+  const gift = {
+    uid:fields.get("uid").trim().toLowerCase(),
+    points:Number(fields.get("points")),
+    note:fields.get("note").trim()
+  };
+  if (!gift.note) {
+    giftStatus.textContent = "请填写赠送备注。";
+    return;
+  }
+  const key = JSON.stringify([administrator.uid,gift]);
+  const previous = pendingGifts.get(key);
+  if (!previous && !window.confirm("确认给账号 "+gift.uid+" 赠送 "+gift.points+" 积分？")) return;
+  const requestId = previous ?? crypto.randomUUID();
+  pendingGifts.set(key,requestId);
+  giftSubmit.disabled = true;
+  giftStatus.textContent = "正在发放赠送积分…";
+  const sameAccount = () => auth.currentUser?.uid === administrator.uid && mode === "account";
+  try {
+    const response = await fetch("/credits/gift",{
+      method:"POST",
+      headers:{"Content-Type":"application/json",Authorization:"Bearer "+await administrator.getIdToken()},
+      body:JSON.stringify({...gift,requestId})
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      if (response.status < 500) pendingGifts.delete(key);
+      if (sameAccount()) giftStatus.textContent = data.error || "赠送积分失败，请重试。";
+      return;
+    }
+    pendingGifts.delete(key);
+    if (!sameAccount()) return;
+    giftForm.reset();
+    giftStatus.textContent = (data.alreadyRecorded ? "该笔赠送已入账，共 " : "已赠送 ")+data.points+" 积分。";
+    if (gift.uid === administrator.uid) void refreshCredits();
+  } catch {
+    if (sameAccount()) giftStatus.textContent = "暂时无法确认赠送结果。请保持填写内容不变，再点一次确认赠送。";
+  } finally {
+    giftSubmit.disabled = false;
+  }
+};
 
 inviteForm.onsubmit = async event => {
   event.preventDefault();
@@ -239,7 +303,7 @@ async function submitInvite(input) {
     if (!response.ok) throw new Error(data.error || "开户失败。");
     if (!dialog.open || mode !== "account" || auth.currentUser?.uid !== user.uid) return;
     inviteForm.reset();
-    inviteResult.value = "登录网址："+location.origin+"\n邮箱："+data.email+"\n初始密码："+data.password;
+    inviteResult.value = "登录网址："+location.origin+"\n邮箱："+data.email+"\n初始密码："+data.password+"\n账号编号："+data.uid;
     inviteResult.hidden = false;
     copyInvite.hidden = false;
     inviteResult.scrollIntoView({block:"nearest"});

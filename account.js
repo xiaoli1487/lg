@@ -376,6 +376,7 @@ async function initialize() {
       return data;
     };
     const update = session => {
+      const previousUid = auth.currentUser?.uid;
       auth.currentUser = session?.user ? {
         uid:session.user.id, email:session.user.email,
         getIdToken:async () => {
@@ -385,6 +386,7 @@ async function initialize() {
         }
       } : null;
       entry.textContent = auth.currentUser ? "我的账号" : "注册 / 登录";
+      if (previousUid !== auth.currentUser?.uid) window.dispatchEvent(new Event("manju-account-change"));
     };
     const redirectTo = location.origin + "/";
     auth = {currentUser:null};

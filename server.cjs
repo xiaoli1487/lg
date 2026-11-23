@@ -15,6 +15,7 @@ function runCharacterServer() {
   const creditAdmin = process.env.MANJU_CREDIT_ADMIN_UID;
   const inviteOnly = supabaseAuth && process.env.MANJU_INVITE_ONLY === "1";
   let credits;
+  let animation;
   if (creditMode) {
     const costs = {
       "/write-story":Number(process.env.MANJU_STORY_COST ?? "9.2"),
@@ -31,6 +32,9 @@ function runCharacterServer() {
       credits = require("./supabase-credits.cjs").createSupabaseCredits(
         supabaseUrl,supabaseKey,secret,costs,{inviteOnly,administrator:creditAdmin}
       );
+      if (creditAdmin && process.env.QIANWEN_API_KEY && !process.env.QIANWEN_API_KEY.startsWith("sk-sp-")) {
+        animation = require("./wan-animation.cjs").createAnimation(process.env.QIANWEN_API_KEY,secret);
+      }
     } else {
       const {initializeApp,cert} = require("firebase-admin/app");
       const {getAuth} = require("firebase-admin/auth");
@@ -77,6 +81,20 @@ function runCharacterServer() {
       }
       catch (error) { return reply(error.status || 503,{error:error.status ? error.message : "暂时无法查询积分。"}); }
     }
+    if (animation && req.method === "GET" && req.url === "/wan-animation.js") {
+      res.writeHead(200, {"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
+      return fs.createReadStream(path.join(__dirname,"wan-animation.js")).pipe(res);
+    }
+    if (animation && req.method === "POST" && req.url === "/wan-animation" && req.headers.origin === origin) {
+      try {
+        const uid = await credits.identify(req);
+        if (uid !== creditAdmin) return reply(403,{error:"动画生成功能目前仅向管理员开放。"});
+        return await animation.handle(req,res,reply,uid);
+      } catch (error) {
+        if (res.headersSent) return res.destroy();
+        return reply(error.status || 502,{error:error.status ? error.message : "千问视频服务暂不可用，请稍后查询。"});
+      }
+    }
     if (authEnabled && req.method === "GET" && req.url === "/account.js") {
       res.writeHead(200, {"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
       return fs.createReadStream(path.join(__dirname,"account.js")).pipe(res);
@@ -93,7 +111,11 @@ function runCharacterServer() {
         const encodedCosts = Object.entries(credits.costs).map(([route,cost])=>' data-cost-'+route.slice(1)+'="'+cost+'"').join("");
         page = page.replace("<html lang=\"zh-CN\">", '<html lang="zh-CN" data-credit-provider="' + managedProvider + '"' + encodedCosts + '>');
       }
-      if (authEnabled) page = page.replace("</head>", '<script type="module" src="/account.js"></script></head>');
+      if (authEnabled) {
+        const accountScript = '<script type="module" src="/account.js"></script>';
+        const animationScript = animation ? '<script defer src="/wan-animation.js"></script>' : '';
+        page = page.replace("</head>", accountScript + animationScript + "</head>");
+      }
       return res.end(page);
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";

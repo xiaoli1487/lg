@@ -205,3 +205,49 @@ dialog[aria-labelledby="account-title"] > form > h3 { margin:0; font-size:15px; 
   .top-actions .button { min-height:33px; padding:5px 7px; font-size:12px; }
   .studio-tab-list button { min-height:39px; }
 }
+
+.studio-story {
+  grid-template-columns:minmax(0,1fr) minmax(260px,355px);
+}
+main:has(.studio-story) .top-actions #next { display:none; }
+.studio-story .story-compose { gap:17px; }
+.studio-story #story-idea {
+  min-height:clamp(180px,29dvh,310px);
+  padding:13px;
+}
+.story-basics {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(126px,170px);
+  gap:12px;
+}
+.story-main-actions { margin-top:2px; align-items:center; }
+.story-main-actions .button.primary { min-height:42px; }
+.story-disclosure {
+  border-top:1px solid var(--line);
+  min-width:0;
+}
+.story-disclosure > summary {
+  min-height:43px;
+  padding:12px 0;
+  cursor:pointer;
+  color:var(--text);
+  font-weight:650;
+}
+.story-disclosure > summary:hover { color:var(--accent); }
+.story-disclosure[open] { padding-bottom:10px; }
+.story-disclosure[open] > :not(summary) { margin-top:10px; }
+.story-settings-body { display:grid; gap:14px; }
+.story-settings-body > .row { grid-template-columns:minmax(0,1fr); }
+.story-settings-body > .field { gap:10px; }
+.story-advanced-actions { padding-top:2px; }
+.studio-story .story-tools { gap:0; }
+.story-tools > h2 { margin:0 0 11px; font-size:18px; }
+.story-tools > .button { margin-bottom:12px; }
+.story-tools #screenplay-text, .story-tools #story-text { min-height:180px; }
+.story-tools .story-disclosure p { font-size:13px; }
+.story-tools .story-disclosure .button { max-width:100%; white-space:normal; }
+@media (max-width:520px) {
+  .story-basics { grid-template-columns:minmax(0,1fr) minmax(110px,140px); gap:8px; }
+  .studio-story .story-compose { gap:13px; }
+  .studio-story #story-idea { min-height:170px; }
+}

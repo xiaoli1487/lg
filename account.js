@@ -22,7 +22,7 @@ const status = form.querySelector('[role="status"]');
 const submit = form.querySelector('[type="submit"]');
 const change = form.querySelector("[data-switch]");
 const reset = form.querySelector("[data-reset]");
-let mode = "login", auth, sdk, loading;
+let mode = "login", auth, sdk, loading, inviteOnly = false;
 const creditMode = Boolean(document.documentElement.dataset.creditProvider);
 const walletStatus = document.createElement("p");
 walletStatus.setAttribute("role","status");
@@ -58,6 +58,26 @@ rechargeForm.innerHTML = `
   <button class="button primary" type="submit">确认已到账并加分</button>
   <p role="status"></p>`;
 dialog.append(rechargeForm);
+const inviteForm = document.createElement("form");
+inviteForm.hidden = true;
+inviteForm.className = "inspector-body";
+inviteForm.innerHTML = `
+  <h3>开通试运营账号</h3>
+  <label class="field">客户邮箱<input name="email" type="email" required maxlength="254"></label>
+  <button class="button primary" type="submit">开通账号</button>
+  <p role="status"></p>
+  <textarea readonly hidden aria-label="账号登录信息"></textarea>`;
+dialog.append(inviteForm);
+const inviteStatus = inviteForm.querySelector('[role="status"]');
+const inviteResult = inviteForm.querySelector("textarea");
+const inviteSubmit = inviteForm.querySelector('button[type="submit"]');
+const changePassword = document.createElement("button");
+changePassword.type = "button";
+changePassword.className = "button secondary";
+changePassword.textContent = "修改密码";
+changePassword.hidden = true;
+submit.after(changePassword);
+changePassword.onclick = () => display("recovery");
 const rechargeStatus = rechargeForm.querySelector('[role="status"]');
 const rechargeSubmit = rechargeForm.querySelector('button[type="submit"]');
 let packages = [];
@@ -78,9 +98,10 @@ function display(next) {
   const titles = {login:"登录工坊",register:"注册工坊账号",reset:"找回密码",recovery:"设置新密码",account:"我的账号"};
   form.querySelector("h2").textContent = titles[mode];
   submit.textContent = {login:"登录",register:"注册",reset:"发送重置邮件",recovery:"保存新密码",account:"退出登录"}[mode];
-  change.hidden = account || mode === "recovery";
+  change.hidden = inviteOnly || account || mode === "recovery";
   change.textContent = mode === "login" ? "注册账号" : "返回登录";
-  reset.hidden = mode !== "login";
+  reset.hidden = inviteOnly || mode !== "login";
+  changePassword.hidden = !(account && inviteOnly);
   status.textContent = account ? auth.currentUser?.email || "" : "";
   walletStatus.hidden = !(account && creditMode);
   packageList.hidden = true;
@@ -89,6 +110,8 @@ function display(next) {
   rechargeText.value = "";
   copyStatus.textContent = "";
   rechargeForm.hidden = true;
+  inviteForm.hidden = true;
+  if (inviteOnly && mode === "login") status.textContent = "试运营仅向受邀账号开放。忘记密码请联系管理员。";
   if (!account) {
     rechargeForm.reset();
     rechargeStatus.textContent = "";
@@ -129,11 +152,39 @@ async function refreshCredits() {
         ...packages.map(pack=>new Option(packageLabel(pack),pack.id))
       );
       rechargeForm.hidden = !data.manualAdmin;
+      inviteForm.hidden = !data.inviteAdmin;
     }
   } catch {
     if (auth.currentUser === user) walletStatus.textContent = "暂时无法查询积分。";
   }
 }
+
+inviteForm.onsubmit = async event => {
+  event.preventDefault();
+  const user = auth?.currentUser;
+  if (!user || inviteForm.hidden || inviteSubmit.disabled) return;
+  inviteSubmit.disabled = true;
+  inviteResult.hidden = true;
+  inviteResult.value = "";
+  inviteStatus.textContent = "正在开通账号…";
+  try {
+    const email = inviteForm.elements.email.value.trim();
+    const response = await fetch("/credits/invite",{
+      method:"POST",
+      headers:{"Content-Type":"application/json",Authorization:"Bearer "+await user.getIdToken()},
+      body:JSON.stringify({email})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "开户失败。");
+    if (!dialog.open || mode !== "account" || auth.currentUser?.uid !== user.uid) return;
+    inviteForm.reset();
+    inviteResult.value = "登录网址："+location.origin+"\n邮箱："+data.email+"\n初始密码："+data.password;
+    inviteResult.hidden = false;
+    inviteResult.select();
+    inviteStatus.textContent = "账号已开通。请复制登录信息并私发给客户，客户登录后可修改密码。";
+  } catch (error) { inviteStatus.textContent = error.message; }
+  finally { inviteSubmit.disabled = false; }
+};
 
 copyRecharge.onclick = async () => {
   const user = auth?.currentUser;
@@ -190,6 +241,7 @@ async function initialize() {
   if (!response.ok) throw Error();
   const config = await response.json();
   if (config.provider === "supabase") {
+    inviteOnly = config.inviteOnly === true;
     const {createClient} = await import("https://esm.sh/@supabase/supabase-js@2.119.0?bundle");
     const client = createClient(config.url,config.publishableKey);
     const unwrap = async call => {
@@ -259,7 +311,13 @@ entry.onclick = async () => {
   finally { submit.disabled = !auth; }
 };
 form.querySelector("[data-close]").onclick = () => dialog.close();
-dialog.onclose = () => { password.value=""; };
+dialog.onclose = () => {
+  password.value = "";
+  inviteForm.reset();
+  inviteResult.hidden = true;
+  inviteResult.value = "";
+  inviteStatus.textContent = "";
+};
 change.onclick = () => display(mode === "login" ? "register" : "login");
 reset.onclick = () => display("reset");
 form.onsubmit = async event => {

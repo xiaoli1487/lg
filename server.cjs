@@ -13,6 +13,7 @@ function runCharacterServer() {
   const vars = {openai:"OPENAI_API_KEY",deepseek:"DEEPSEEK_API_KEY",qwen:"DASHSCOPE_API_KEY",qwenpay:"QIANWEN_API_KEY"};
   const managedProvider = process.env.MANJU_MODEL_PROVIDER || "qwenpay";
   const creditAdmin = process.env.MANJU_CREDIT_ADMIN_UID;
+  const inviteOnly = supabaseAuth && process.env.MANJU_INVITE_ONLY === "1";
   let credits;
   if (creditMode) {
     const costs = {
@@ -26,7 +27,10 @@ function runCharacterServer() {
     if (supabaseAuth) {
       const secret = process.env.SUPABASE_SECRET_KEY;
       if (!secret) throw new Error("Supabase 积分模式缺少后台凭据。");
-      credits = require("./supabase-credits.cjs").createSupabaseCredits(supabaseUrl,supabaseKey,secret,costs);
+      if (inviteOnly && !creditAdmin) throw new Error("邀请制缺少管理员账号编号。");
+      credits = require("./supabase-credits.cjs").createSupabaseCredits(
+        supabaseUrl,supabaseKey,secret,costs,{inviteOnly,administrator:creditAdmin}
+      );
     } else {
       const {initializeApp,cert} = require("firebase-admin/app");
       const {getAuth} = require("firebase-admin/auth");
@@ -66,6 +70,7 @@ function runCharacterServer() {
           costs:credits.costs,
           packages:credits.packages,
           manualAdmin:uid===creditAdmin,
+          inviteAdmin:inviteOnly && uid===creditAdmin,
           rechargeContact:creditAdmin ? process.env.MANJU_RECHARGE_CONTACT?.trim() || "" : ""
         });
       }
@@ -76,7 +81,7 @@ function runCharacterServer() {
       return fs.createReadStream(path.join(__dirname,"account.js")).pipe(res);
     }
     if (authEnabled && req.method === "GET" && req.url === "/auth-config") {
-      if (supabaseAuth) return reply(200,{provider:"supabase",url:supabaseUrl,publishableKey:supabaseKey});
+      if (supabaseAuth) return reply(200,{provider:"supabase",url:supabaseUrl,publishableKey:supabaseKey,inviteOnly});
       return reply(200,{apiKey:process.env.FIREBASE_WEB_API_KEY,projectId:process.env.FIREBASE_PROJECT_ID,authDomain:process.env.FIREBASE_PROJECT_ID+".firebaseapp.com"});
     }
     if (req.method === "GET" && req.url === "/") {
@@ -91,18 +96,20 @@ function runCharacterServer() {
       return res.end(page);
     }
     const manualPayment = Boolean(credits) && req.url === "/credits/manual-payment";
-    if (req.method !== "POST" || (!manualPayment && !["/three-view", "/shot-image", "/write-story"].includes(req.url)) || req.headers.origin !== origin) return reply(403, {});
+    const invite = Boolean(credits) && inviteOnly && req.url === "/credits/invite";
+    if (req.method !== "POST" || (!manualPayment && !invite && !["/three-view", "/shot-image", "/write-story"].includes(req.url)) || req.headers.origin !== origin) return reply(403, {});
     try {
       const uid = credits && await credits.identify(req);
-      if (manualPayment && uid !== creditAdmin) return reply(403,{error:"此操作需要积分管理员权限。"});
+      if ((manualPayment || invite) && uid !== creditAdmin) return reply(403,{error:"此操作需要积分管理员权限。"});
       const chunks = [];
       let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > (manualPayment ? 4096 : 16 * 1024 * 1024)) return reply(413, { error: "提交内容过大。" });
+        if (size > (manualPayment || invite ? 4096 : 16 * 1024 * 1024)) return reply(413, { error: "提交内容过大。" });
         chunks.push(chunk);
       }
       const data = JSON.parse(Buffer.concat(chunks).toString());
+      if (invite) return reply(200,await credits.invite(data));
       if (manualPayment) return reply(200,await credits.addManualPayment(uid,data));
       const { image, prompt, refs = [] } = data;
       const provider = credits ? managedProvider : data.provider || "openai";

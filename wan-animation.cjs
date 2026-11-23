@@ -77,11 +77,23 @@ function createAnimation(apiKey, signingKey, request = fetch) {
     let url;
     try { url = new URL(output.video_url); }
     catch { return reply(502,{error:"千问平台没有返回可用的视频文件。"}); }
-    const trustedHost = /^dashscope-result(?:-[a-z0-9-]+)?\.oss-[a-z0-9-]+\.aliyuncs\.com$/;
-    if (url.protocol !== "https:" || url.port || url.username || url.password || !trustedHost.test(url.hostname)) {
-      return reply(502,{error:"千问平台返回的视频地址无法验证。"});
+    const publicOssHost = /^(?!.*-internal\.aliyuncs\.com$)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.(?:oss-[a-z0-9-]+|[a-z0-9-]+\.oss)\.aliyuncs\.com$/;
+    const qwenHost = /^(?:[a-z0-9-]+\.)+(?:qianwenai(?:api)?\.com|qwencloudapi\.com)$/;
+    const canProxy = publicOssHost.test(url.hostname) || qwenHost.test(url.hostname);
+    if (url.protocol === "http:" && canProxy) url.protocol = "https:";
+    if (url.protocol !== "https:" || url.port || url.username || url.password) {
+      console.warn("Wan result URL not accepted", {protocol:url.protocol, hostname:url.hostname});
+      return reply(502,{error:"千问平台返回了非安全视频地址，请从千问任务记录下载源文件。"});
     }
-    const video = await request(url,{redirect:"error",signal:AbortSignal.timeout(90000)});
+    if (!canProxy) {
+      console.warn("Wan result uses a separate download host", {hostname:url.hostname});
+      return reply(200,{state:"external",videoUrl:url.href});
+    }
+    const video = await request(url,{redirect:"manual",signal:AbortSignal.timeout(90000)});
+    if (video.status >= 300 && video.status < 400) {
+      await video.body?.cancel();
+      return reply(200,{state:"external",videoUrl:url.href});
+    }
     if (video.status === 403 || video.status === 404) return reply(200,{state:"expired"});
     if (!video.ok || !video.body || !/^(video\/mp4|application\/octet-stream)\b/i.test(video.headers.get("content-type") || "")) {
       return reply(502,{error:"暂时无法取回 MP4，请稍后继续查询。"});

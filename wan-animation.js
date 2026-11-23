@@ -1,6 +1,7 @@
 (() => {
   const running = new WeakSet();
   const messages = new WeakMap();
+  const externalDownloads = new WeakMap();
   let enabled = false;
   let accessCheck = 0;
 
@@ -49,6 +50,16 @@
       saveClip.onclick = () => download(shot.video,shot.videoName);
       actions.append(saveClip);
     }
+    const externalUrl = externalDownloads.get(shot);
+    if (externalUrl) {
+      const link = document.createElement("a");
+      link.className = "button secondary";
+      link.textContent = "打开原视频";
+      link.href = externalUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      actions.append(link);
+    }
     const status = document.createElement("small");
     status.setAttribute("role","status");
     status.textContent = messages.get(shot) || (shot.wanJob ? "已提交任务，可继续查询。" : canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
@@ -94,6 +105,7 @@
         const {state} = await response.json();
         if (state === "failed" || state === "expired") {
           delete shot.wanJob;
+          externalDownloads.delete(shot);
           void save();
           report(state === "failed" ? "动画生成失败，可重新生成。" : "任务已过期，可重新生成。");
           return;
@@ -102,8 +114,16 @@
           const output = await animationRequest({action:"download",job});
           if (output.headers.get("content-type") !== "video/mp4") {
             const result = await output.json();
+            if (result.state === "external") {
+              const url = new URL(result.videoUrl);
+              if (url.protocol !== "https:" || url.username || url.password || url.port) throw Error("视频地址无效。");
+              externalDownloads.set(shot,url.href);
+              report("动画已生成。可打开原视频下载，再用「导入视频」放回本镜。");
+              return;
+            }
             if (result.state === "expired") {
               delete shot.wanJob;
+              externalDownloads.delete(shot);
               void save();
               report("视频下载链接已过期，可重新生成。");
               return;
@@ -117,6 +137,7 @@
             if (!project.shots.includes(shot) || shot.image !== originalImage || shot.video !== originalVideo) {
               download(video,name);
               delete shot.wanJob;
+              externalDownloads.delete(shot);
               void save();
               notify("分镜素材已变更，动画已单独下载。");
               return;
@@ -128,6 +149,7 @@
             shot.videoName = name;
             shot.videoDuration = duration;
             delete shot.wanJob;
+            externalDownloads.delete(shot);
           } finally {
             releaseClip(clip);
           }

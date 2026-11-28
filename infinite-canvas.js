@@ -15,14 +15,16 @@
   page.setAttribute("aria-labelledby","canvas-title");
   page.innerHTML = '<header class="canvas-header"><div><span class="canvas-project"></span><h1 id="canvas-title">无限画布</h1></div>' +
     '<button type="button" class="button secondary" data-canvas="back">返回制作</button></header>' +
-    '<div class="canvas-tools"><div class="canvas-actions"><button type="button" class="button primary" data-canvas="text">＋ 文本节点</button>' +
+    '<div class="canvas-tools"><div class="canvas-actions"><select aria-label="选择分镜"></select>' +
+    '<button type="button" class="button primary" data-canvas="extract">一键导入素材</button>' +
+    '<button type="button" class="button secondary" data-canvas="shot">添加分镜卡片</button></div>' +
+    '<div class="canvas-actions"><button type="button" class="button secondary" data-canvas="text">＋ 文本节点</button>' +
     '<button type="button" class="button secondary" data-canvas="image">＋ 图片节点</button><input type="file" accept="image/*" multiple hidden>' +
     '<button type="button" class="button secondary" data-canvas="video">＋ 视频节点</button><input type="file" accept="video/*,.mp4,.webm,.mov" multiple hidden>' +
-    '<select aria-label="选择分镜"></select><button type="button" class="button secondary" data-canvas="shot">添加分镜</button></div>' +
-    '<div class="canvas-actions"><button type="button" class="button secondary" data-canvas="link" aria-pressed="false">连线</button>' +
+    '<button type="button" class="button secondary" data-canvas="link" aria-pressed="false">连线</button>' +
     '<button type="button" class="button quiet" data-canvas="remove" disabled>删除选中</button></div></div>' +
     '<div class="canvas-surface" tabindex="0" aria-label="画布"><canvas class="canvas-lines" aria-hidden="true"></canvas><div class="canvas-world"></div>' +
-    '<div class="canvas-empty"><strong>添加文本或分镜节点</strong><span>也可以把图片和视频拖到这里。</span></div>' +
+    '<div class="canvas-empty"><strong>选择分镜后，点「一键导入素材」</strong><span>也可以把图片和视频拖到这里。</span></div>' +
     '<div class="canvas-bottom"><span class="canvas-status" role="status"></span><div class="canvas-zoom">' +
     '<button type="button" class="button quiet" data-canvas="out" aria-label="缩小">−</button>' +
     '<button type="button" class="button quiet" data-canvas="reset" aria-label="恢复百分之百">100%</button>' +
@@ -95,6 +97,7 @@
     if (previous && Number(previous) < project.shots.length) shotSelect.value = previous;
     else if (project.shots[selected]) shotSelect.value = String(selected);
     action("shot").disabled = !project.shots.length;
+    action("extract").disabled = !project.shots.length;
   }
 
   function open() {
@@ -314,29 +317,31 @@
     return [shot.image,shot.videoPoster].map(src=>artSource(src || "")).find(isImage) || "";
   }
 
-  function extractShot(node) {
-    const legacy = /^第 (\d+) 镜 · (.*)$/.exec(node.title);
+  function extractShot(node, selectedShot = null, index = -1) {
+    const legacy = /^第 (\d+) 镜 · (.*)$/.exec(node?.title || "");
     const candidate = legacy && project.shots[Number(legacy[1])-1];
-    const shot = node.shotId ? project.shots.find(shot=>shot.canvasSourceId === node.shotId) :
-      candidate && (candidate.name || "未命名分镜") === legacy[2] ? candidate : null;
-    const text = shot ? shotText(shot) || node.text : node.text;
-    const image = shot ? shotImage(shot) : node.image;
+    const shot = selectedShot || (node?.shotId ? project.shots.find(shot=>shot.canvasSourceId === node.shotId) :
+      candidate && (candidate.name || "未命名分镜") === legacy[2] ? candidate : null);
+    const text = (shot && shotText(shot)) || node?.text || "";
+    const image = shot ? shotImage(shot) : node?.image;
     const choices = [
       ["text","分镜文字",text.trim() && {text:text.slice(0,12000)}],
       ["image","首帧图",isImage(image) && {image}],
       ["video","分镜视频",isVideo(shot?.video) && {video:shot.video,image:isImage(image) ? image : ""}]
     ];
     const available = choices.filter(([, ,payload])=>payload);
-    const existing = board.nodes.filter(item=>item.sourceNode === node.id);
+    const existing = node ? board.nodes.filter(item=>item.sourceNode === node.id) : [];
     const missing = available.filter(([kind])=>!existing.some(item=>item.kind === kind));
     if (!missing.length) {
-      showMessage(available.length ? "已有素材节点已保留，删除节点后可重新导入。" : "该分镜暂无可导入的素材。");
+      if (existing.length) fit([node,...existing]);
+      showMessage(available.length ? "该分镜的素材已在画布上。" : "该分镜暂无可导入的素材。");
       return;
     }
-    if (missing.length > maxCards-board.nodes.length) {
+    if (missing.length + Number(!node) > maxCards-board.nodes.length) {
       showMessage("画布空间不足，请删除部分节点后重新导入。");
       return;
     }
+    if (!node) node = addShotCard(shot,index);
     if (shot && !node.shotId) node.shotId = shot.canvasSourceId ||= crypto.randomUUID();
     const added = missing.map(([kind,title,payload],index)=>{
       const x = node.x + width + 64;
@@ -350,7 +355,7 @@
     }
     picked = node.id;
     render();
-    fit([node,...added]);
+    fit([node,...existing,...added]);
     showMessage("已导入" + missing.map(([,title])=>title).join("、") + (shot && !shot.video ? "。本镜暂无视频。" : "。"));
   }
 
@@ -454,12 +459,26 @@
       if (files.length) void importMedia(files,undefined,kind);
     };
   }
+  function shotTitle(shot,index) {
+    return ("第 " + (index+1) + " 镜 · " + (shot.name || "未命名分镜")).slice(0,160);
+  }
+
+  function addShotCard(shot,index) {
+    return add("shot",{title:shotTitle(shot,index),text:shotText(shot).slice(0,12000),
+      image:shotImage(shot),shotId:shot.canvasSourceId ||= crypto.randomUUID()});
+  }
+
+  action("extract").onclick = ()=>{
+    const index = Number(shotSelect.value), shot = project.shots[index];
+    if (!shot) return;
+    const node = board.nodes.find(item=>item.kind === "shot" && (item.shotId ?
+      item.shotId === shot.canvasSourceId : item.title === shotTitle(shot,index)));
+    extractShot(node,shot,index);
+  };
   action("shot").onclick = ()=>{
     const index = Number(shotSelect.value), shot = project.shots[index];
     if (!shot) return;
-    const title = shot.name || "未命名分镜";
-    const node = add("shot",{title:("第 " + (index+1) + " 镜 · " + title).slice(0,160),text:shotText(shot).slice(0,12000),
-      image:shotImage(shot),shotId:shot.canvasSourceId ||= crypto.randomUUID()});
+    const node = addShotCard(shot,index);
     if (!node) return;
     render();
     persist();

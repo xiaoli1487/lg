@@ -16,6 +16,7 @@ function runCharacterServer() {
   const inviteOnly = supabaseAuth && process.env.MANJU_INVITE_ONLY === "1";
   let credits;
   let animation;
+  let manualVideo;
   if (creditMode) {
     const costs = {
       "/write-story":Number(process.env.MANJU_STORY_COST ?? "9.2"),
@@ -32,6 +33,7 @@ function runCharacterServer() {
       credits = require("./supabase-credits.cjs").createSupabaseCredits(
         supabaseUrl,supabaseKey,secret,costs,{inviteOnly,administrator:creditAdmin}
       );
+      if (creditAdmin) manualVideo = require("./manual-video.cjs").createManualVideo(supabaseUrl,secret,creditAdmin);
       if (creditAdmin && process.env.QIANWEN_API_KEY && !process.env.QIANWEN_API_KEY.startsWith("sk-sp-")) {
         animation = require("./wan-animation.cjs").createAnimation(process.env.QIANWEN_API_KEY,secret,credits.videoRpc);
         setInterval(()=>void animation.reconcile(),45000).unref();
@@ -96,7 +98,21 @@ function runCharacterServer() {
       }
       catch (error) { return reply(error.status || 503,{error:error.status ? error.message : "暂时无法查询积分。"}); }
     }
-    if (animation && req.method === "GET" && req.url === "/video-generation.js") {
+    const manualPath = req.url.split("?")[0];
+    if (manualVideo && req.method === "POST" && ["/manual-video","/manual-video/upload"].includes(manualPath) && req.headers.origin === origin) {
+      try {
+        const uid = await credits.identify(req);
+        return await manualVideo.handle(req,res,reply,uid,new URL(req.url,origin));
+      } catch (error) {
+        if (res.headersSent) return res.destroy();
+        return reply(error.status || 502,{error:error.status ? error.message : "人工视频服务暂不可用。"});
+      }
+    }
+    if (manualVideo && req.method === "GET" && req.url === "/manual-video-admin.js") {
+      res.writeHead(200,{"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
+      return fs.createReadStream(path.join(__dirname,"manual-video-admin.js")).pipe(res);
+    }
+    if ((animation || manualVideo) && req.method === "GET" && req.url === "/video-generation.js") {
       res.writeHead(200, {"content-type":"text/javascript; charset=utf-8","cache-control":"no-store"});
       return fs.createReadStream(path.join(__dirname,"wan-animation.js")).pipe(res);
     }
@@ -127,7 +143,8 @@ function runCharacterServer() {
       }
       if (authEnabled) {
         const accountScript = '<script type="module" src="/account.js"></script>';
-        const animationScript = animation ? '<script defer src="/video-generation.js"></script>' : '';
+        const animationScript = (animation || manualVideo ? '<script defer src="/video-generation.js"></script>' : '') +
+          (manualVideo ? '<script defer src="/manual-video-admin.js"></script>' : '');
         page = page.replace("</head>", accountScript + animationScript + "</head>");
       }
       const layout = '<link rel="stylesheet" href="/studio-layout.css"><script defer src="/studio-layout.js"></script>';

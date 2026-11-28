@@ -77,7 +77,7 @@
         sourceNode:typeof node.sourceNode === "string" ? node.sourceNode : "",
         ...(kind === "video" ? {animationSettings:node.animationSettings,videoName:node.videoName,videoDuration:finite(node.videoDuration),
           videoPoster:isImage(node.videoPoster) ? node.videoPoster : "",wanJob:node.wanJob,
-          videoRequestId:node.videoRequestId, pendingPoster:isImage(node.pendingPoster) ? node.pendingPoster : ""} : {})}];
+          videoRequestId:node.videoRequestId, manualVideoRequestId:node.manualVideoRequestId, pendingPoster:isImage(node.pendingPoster) ? node.pendingPoster : ""} : {})}];
     }) : [];
     const links = Array.isArray(source?.links) ? source.links.slice(0,maxLinks).filter(link=>
       link && link.from !== link.to && ids.has(link.from) && ids.has(link.to)

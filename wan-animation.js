@@ -3,11 +3,14 @@
   const messages = new WeakMap();
   const pendingText = "生成耗时较长，完成后自动显示";
   let enabled = false;
+  let manualEnabled = false;
   let models = [];
   let accessCheck = 0;
 
   async function animationRequest(body) {
-    const response = await requestGeneration("/video-generation",body);
+    const manual = body.action === "submit" || body.job?.startsWith("manual.");
+    const payload = manual && body.job ? {action:body.action,id:body.job.slice(7)} : body;
+    const response = await requestGeneration(manual ? "/manual-video" : "/video-generation",payload);
     if (!response.ok) {
       const data = await response.json().catch(()=>({}));
       throw Object.assign(Error(data.error || "动画服务连接失败。"),{status:response.status});
@@ -54,7 +57,7 @@
     workspace.querySelector("[data-wan-animation]")?.remove();
     const tools = workspace.querySelector(".video-tools");
     const shot = project.shots[selected];
-    if (!tools || !shot || !enabled) return;
+    if (!tools || !shot || (!enabled && !manualEnabled)) return;
     const panel = document.createElement("div");
     panel.className = "video-tools";
     panel.dataset.wanAnimation = "";
@@ -68,7 +71,7 @@
     const title = document.createElement("span");
     title.textContent = canvas ? canvas.title : "站内生成动画";
     label.append(title);
-    if (!enabled) {
+    if (!enabled && !manualEnabled) {
       label.append("请登录后使用视频生成。");
       return label;
     }
@@ -76,7 +79,8 @@
     const pendingModel = shot.wanJob && shot.animationSettings?.model;
     const mode = pendingModel || (inputs?.references.length ? "reference" :
       canvas && !inputs.image ? "narrative" : "");
-    const choices = models.filter(item=>mode ? item.id === mode : item.id !== "reference");
+    const choices = (models.length ? models : [{id:mode || "economy",name:"由管理员制作",min:5,max:5,promptLimit:20000,price:{"480P":[0]}}])
+      .filter(item=>mode ? item.id === mode : item.id !== "reference");
     if (!choices.length) {
       label.append("当前视频服务不支持这组输入。");
       return label;
@@ -109,7 +113,10 @@
     const info = document.createElement("small");
     info.textContent = settings.resolution + " · " + settings.duration + " 秒 · " +
       (model.id === "reference" ? "有声" : settings.audio ? "有声" : "无声") + " · 本次 " + estimatedCost(model,settings) + " 积分";
-    label.append(info);
+    if (enabled && !shot.wanJob?.startsWith("manual.")) label.append(info);
+    if (manualEnabled && shot.wanJob?.startsWith("manual.") && !running.has(shot) && !messages.has(shot)) {
+      queueMicrotask(()=>{ if (!messages.has(shot)) void animate(shot,settings,model,canvas,inputs,true); });
+    }
     const actions = document.createElement("div");
     actions.className = "actions";
     const generate = document.createElement("button");
@@ -118,8 +125,17 @@
     generate.textContent = running.has(shot) ? pendingText : shot.wanJob ? "继续查询视频" : canvas ? "生成视频" : "生成动画";
     const inputError = canvas && !inputs.prompt ? "请连接有内容的文本或分镜节点。" : "";
     generate.disabled = running.has(shot) || (!shot.wanJob && (canvas ? Boolean(inputError) : !canAnimate(shot)));
-    generate.onclick = () => void animate(shot,settings,model,canvas,inputs);
-    actions.append(generate);
+    generate.onclick = () => void animate(shot,settings,model,canvas,inputs,shot.wanJob?.startsWith("manual."));
+    if (enabled || shot.wanJob?.startsWith("manual.")) actions.append(generate);
+    if (manualEnabled && !shot.wanJob) {
+      const manual = document.createElement("button");
+      manual.type = "button";
+      manual.className = "button secondary";
+      manual.textContent = "提交人工制作";
+      manual.disabled = running.has(shot) || Boolean(inputError);
+      manual.onclick = ()=>void animate(shot,settings,model,canvas,inputs,true);
+      actions.append(manual);
+    }
     if (shot.video instanceof Blob && shot.videoName?.includes("动画-")) {
       const saveClip = document.createElement("button");
       saveClip.type = "button";
@@ -158,13 +174,15 @@
     return Array.from(parts.filter(Boolean).join("\n")).slice(0,limit).join("");
   }
 
-  async function animate(shot,settings,model,canvas,inputs) {
+  async function animate(shot,settings,model,canvas,inputs,manual = false) {
     if (running.has(shot)) return;
     const originalVideo = shot.video;
     const originalImage = canvas ? (shot.wanJob ? shot.pendingPoster || "" : inputs.image || inputs.references[0] || "") : shot.image;
     const exists = canvas?.exists || (()=>project.shots.includes(shot));
     const refresh = canvas?.render || (()=>{ if (project.shots[selected] === shot) renderAnimation(); });
-    if (!shot.wanJob && ((canvas ? !inputs.prompt : !canAnimate(shot)) ||
+    if (!shot.wanJob && manual &&
+        !window.confirm("将本次的提示词和图片提交给管理员制作视频。本次提交不扣积分。确认提交？")) return;
+    if (!shot.wanJob && !manual && ((canvas ? !inputs.prompt : !canAnimate(shot)) ||
         !window.confirm("用" + model.name + "生成 " + settings.resolution + "、" + settings.duration +
           " 秒动画，将预扣 " + estimatedCost(model,settings) + " 积分。生成失败会退回积分。"
           + (originalVideo ? "生成成功后将替换现有视频。" : "") + "确认生成？"))) return;
@@ -176,31 +194,36 @@
     report(pendingText);
     try {
       if (!shot.wanJob) {
-        const requestId = shot.videoRequestId || crypto.randomUUID();
-        shot.videoRequestId = requestId;
+        const requestKey = manual ? "manualVideoRequestId" : "videoRequestId";
+        const requestId = shot[requestKey] ||= crypto.randomUUID();
         shot.animationSettings = settings;
-        if (canvas) shot.pendingPoster = originalImage;
+        const image = canvas ? inputs.image : canAnimate(shot) ? originalImage : "";
+        const references = canvas ? inputs.references : [shot.sceneRef,shot.visualRef].filter(value=>/^data:image\/(png|jpeg|webp);base64,/.test(value || ""));
+        if (manual || canvas) shot.pendingPoster = image || references[0] || "";
         await save();
-        const prompt = canvas ? Array.from(inputs.prompt).slice(0,model.promptLimit).join("") :
-          animationPrompt(shot,settings,model.promptLimit);
-        const response = await animationRequest({action:"create",requestId,image:canvas ? inputs.image : originalImage,prompt,
-          ...(canvas ? {references:inputs.references} : {}),...settings});
+        const prompt = manual ? (canvas ? inputs.prompt : [shot.direction,shot.line].filter(Boolean).join("\n\n")).trim() || "根据分镜素材制作视频。" :
+          canvas ? Array.from(inputs.prompt).slice(0,model.promptLimit).join("") : animationPrompt(shot,settings,model.promptLimit);
+        const payload = manual ? {action:"submit",id:requestId,title:(shot.title || shot.name || "未命名分镜").slice(0,160),
+          image,prompt,references,settings} : {action:"create",requestId,image:originalImage,prompt,
+          ...(canvas ? {references:inputs.references} : {}),...settings};
+        const response = await animationRequest(payload);
         const {job} = await response.json();
         if (!exists()) return;
-        delete shot.videoRequestId;
+        delete shot[requestKey];
         shot.wanJob = job;
         await save();
       }
       const job = shot.wanJob;
-      for (let attempt = 0; attempt < 40; attempt++) {
-        if (!enabled || !exists()) return;
+      for (let attempt = 0; manual || attempt < 40; attempt++) {
+        if (!(manual ? manualEnabled : enabled) || !exists()) return;
         const response = await animationRequest({action:"status",job});
         const {state} = await response.json();
         if (state === "failed" || state === "expired") {
           delete shot.wanJob;
           delete shot.pendingPoster;
           void save();
-          report(state === "failed" ? "动画生成失败。若已预扣积分，已退回钱包。" : "任务已结束或过期，可重新提交。");
+          report(manual ? "管理员未能完成此任务，可重新提交。" :
+            state === "failed" ? "动画生成失败。若已预扣积分，已退回钱包。" : "任务已结束或过期，可重新提交。");
           return;
         }
         if (state === "ready") {
@@ -220,7 +243,7 @@
           const name = "动画-" + (shot.name || shot.title || "未命名分镜") + ".mp4";
           const clip = await loadClip(video);
           try {
-            if (!exists() || (!canvas && shot.image !== originalImage) || shot.video !== originalVideo) {
+            if (!exists() || (!manual && !canvas && shot.image !== originalImage) || shot.video !== originalVideo) {
               download(video,name);
               delete shot.wanJob;
               void save();
@@ -230,7 +253,7 @@
             const duration = clip.video.duration;
             if (!Number.isFinite(duration) || duration <= 0) throw Error("浏览器无法读取这段 MP4。");
             shot.video = video;
-            shot.videoPoster = originalImage;
+            shot.videoPoster = manual ? shot.pendingPoster || "" : originalImage;
             shot.videoName = name;
             shot.videoDuration = duration;
             delete shot.wanJob;
@@ -246,12 +269,13 @@
           return;
         }
         report(pendingText);
-        await new Promise(resolve => setTimeout(resolve,15000));
+        await new Promise(resolve => setTimeout(resolve,manual ? 30000 : 15000));
       }
       report(pendingText + "。点击「继续查询视频」可恢复自动查询。");
     } catch (error) {
-      if (shot.videoRequestId && error.status >= 400 && error.status < 500) {
-        delete shot.videoRequestId;
+      const key = manual ? "manualVideoRequestId" : "videoRequestId";
+      if (shot[key] && error.status >= 400 && error.status < 500) {
+        delete shot[key];
         delete shot.pendingPoster;
         void save();
       }
@@ -266,18 +290,18 @@
 
   async function checkAccess() {
     const version = ++accessCheck;
-    enabled = false;
+    enabled = manualEnabled = false;
     renderAnimation();
-    try {
-      const result = await animationRequest({action:"access"});
-      if (version !== accessCheck) return;
-      const data = await result.json();
-      if (version !== accessCheck) return;
-      models = Array.isArray(data.models) ? data.models : [];
-      enabled = data.enabled === true && models.length > 0;
-      renderAnimation();
-    } catch { /* Video generation requires site access. */ }
-    finally { if (version === accessCheck) window.dispatchEvent(new Event("manju-video-access")); }
+    const [video,manual] = await Promise.allSettled([
+      animationRequest({action:"access"}).then(response=>response.json()),
+      requestGeneration("/manual-video",{action:"access"}).then(response=>response.ok)
+    ]);
+    if (version !== accessCheck) return;
+    models = video.status === "fulfilled" && Array.isArray(video.value.models) ? video.value.models : [];
+    enabled = video.status === "fulfilled" && video.value.enabled === true && models.length>0;
+    manualEnabled = manual.status === "fulfilled" && manual.value;
+    renderAnimation();
+    window.dispatchEvent(new Event("manju-video-access"));
   }
 
   new MutationObserver(renderAnimation).observe(workspace,{childList:true});

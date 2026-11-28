@@ -16,7 +16,9 @@ const models = [
   {id:"flex",name:"灵活版",upstream:"wan2.6-i2v-flash",min:2,max:15,promptLimit:1500,
     price:{ "720P":[15,30], "1080P":[25,50] }},
   {id:"narrative",name:"叙事版",upstream:"wan3.0-video",min:2,max:30,promptLimit:20000,
-    price:{ "480P":[30,30], "720P":[60,60], "1080P":[120,120] }}
+    price:{ "480P":[30,30], "720P":[60,60], "1080P":[120,120] }},
+  {id:"reference",name:"多图参考版",upstream:"wan2.7-r2v",min:2,max:15,promptLimit:5000,
+    price:{ "720P":[80], "1080P":[125] }}
 ];
 
 
@@ -95,7 +97,7 @@ function createAnimation(apiKey, signingKey, rpc, request = fetch) {
     const chunks = [];
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > maxBody) return reply(413,{error:"首帧图片超过 10 MB。"});
+      if (size > maxBody) return reply(413,{error:"图片素材合计超过 10 MB。"});
       chunks.push(chunk);
     }
     let data;
@@ -103,7 +105,7 @@ function createAnimation(apiKey, signingKey, rpc, request = fetch) {
     catch { return reply(400,{error:"请求格式有误。"}); }
     if (data?.action === "access") return reply(200,{enabled:true,models:publicModels});
     if (data?.action === "create") {
-      const {image,prompt,requestId} = data;
+      const {image,prompt,requestId,references = []} = data;
       if (typeof requestId !== "string" || !taskId.test(requestId)) {
         return reply(400,{error:"请刷新页面后提交新动画任务。"});
       }
@@ -114,12 +116,19 @@ function createAnimation(apiKey, signingKey, rpc, request = fetch) {
           typeof audio !== "boolean" || (audio && rates.length < 2)) {
         return reply(400,{error:"请选择该视频模型支持的分辨率、时长和声音设置。"});
       }
-      if (typeof image !== "string" || !firstFrame.test(image) ||
-          Buffer.byteLength(image.slice(image.indexOf(",")+1),"base64") > 10 * 1024 * 1024 ||
+      const referenceMode = model === "reference";
+      const validImage = value => typeof value === "string" && firstFrame.test(value);
+      if (!Array.isArray(references) || (referenceMode ? references.length < 1 || references.length > 5 : references.length > 0) ||
+          (image ? !validImage(image) : image !== "" || !referenceMode && model !== "narrative") ||
+          !references.every(validImage) ||
+          [image,...references].filter(Boolean).reduce((bytes,value)=>
+            bytes+Buffer.byteLength(value.slice(value.indexOf(",")+1),"base64"),0) > 10 * 1024 * 1024 ||
           typeof prompt !== "string" || !prompt.trim() || Array.from(prompt).length > spec.promptLimit) {
-        return reply(400,{error:"请使用 10 MB 以内的 PNG、JPG 或 WebP，并将动画提示词控制在 "+spec.promptLimit+" 字以内。"});
+        return reply(400,{error:"请检查首帧和参考图，图片合计需在 10 MB 以内，提示词限 "+spec.promptLimit+" 字。"});
       }
-      const fingerprint = createHash("sha256").update(JSON.stringify([model,resolution,duration,audio,image,prompt])).digest("hex");
+      const fingerprintData = [model,resolution,duration,audio,image,prompt];
+      if (references.length) fingerprintData.push(references);
+      const fingerprint = createHash("sha256").update(JSON.stringify(fingerprintData)).digest("hex");
       const reservation = await rpc("video_begin",{
         p_uid:uid,p_id:requestId,p_units:rates[Number(audio)]*duration*10,p_fingerprint:fingerprint
       });
@@ -128,10 +137,12 @@ function createAnimation(apiKey, signingKey, rpc, request = fetch) {
       const localJob = "v2." + requestId + "." + signature(uid,"v2:"+requestId).toString("hex");
       if (reservation === "existing") return reply(202,{job:localJob});
       if (reservation !== "created") throw new Error("Credit reservation unavailable");
-      const unified = model === "narrative";
-      const input = unified ? {prompt,media:[{type:"first_frame",url:image}]} : {img_url:image,prompt};
+      const unified = model === "narrative" || referenceMode;
+      const media = image ? [{type:"first_frame",url:image}] : [];
+      media.push(...references.map(url=>({type:"reference_image",url})));
+      const input = unified ? {prompt,...(media.length ? {media} : {})} : {img_url:image,prompt};
       const parameters = {resolution,duration,prompt_extend:false};
-      if (unified) parameters.ratio = "adaptive";
+      if (model === "narrative") parameters.ratio = image ? "adaptive" : "16:9";
       if (rates.length === 2) parameters.audio = audio;
       const {response,output,code} = await provider("/services/aigc/video-generation/video-synthesis",{
         model:spec.upstream,input,parameters

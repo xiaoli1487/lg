@@ -31,12 +31,12 @@
     return label;
   }
 
-  function settingsFor(shot) {
+  function settingsFor(shot, choices = models.filter(item=>item.id !== "reference")) {
     const saved = shot.animationSettings;
     const formerId = typeof saved?.model === "string" ? saved.model : "";
     const migrated = formerId.endsWith("2.2-i2v-plus") ? "detail" :
       formerId.endsWith("2.6-i2v-flash") ? "flex" : formerId.endsWith("3.0-video") ? "narrative" : "economy";
-    const model = models.find(item=>item.id === formerId) ?? models.find(item=>item.id === migrated) ?? models[0];
+    const model = choices.find(item=>item.id === formerId) ?? choices.find(item=>item.id === migrated) ?? choices[0];
     const resolution = typeof saved?.resolution === "string" && Object.hasOwn(model.price,saved.resolution)
       ? saved.resolution : Object.keys(model.price)[0];
     const planned = shot.wanJob && !saved ? 5 : Math.round(shot.seconds) || 5;
@@ -57,18 +57,38 @@
     const panel = document.createElement("div");
     panel.className = "video-tools";
     panel.dataset.wanAnimation = "";
+    panel.append(generationForm(shot));
+    tools.before(panel);
+  }
+
+  function generationForm(shot, canvas) {
     const label = document.createElement("div");
     label.className = "field";
     const title = document.createElement("span");
-    title.textContent = "站内生成动画";
-    const settings = settingsFor(shot);
-    const model = models.find(item=>item.id === settings.model);
+    title.textContent = canvas ? canvas.title : "站内生成动画";
+    label.append(title);
+    if (!enabled) {
+      label.append("请登录后使用视频生成。");
+      return label;
+    }
+    const inputs = canvas?.inputs();
+    const pendingModel = shot.wanJob && shot.animationSettings?.model;
+    const mode = pendingModel || (inputs?.references.length ? "reference" :
+      canvas && !inputs.image ? "narrative" : "");
+    const choices = models.filter(item=>mode ? item.id === mode : item.id !== "reference");
+    if (!choices.length) {
+      label.append("当前视频服务不支持这组输入。");
+      return label;
+    }
+    const settings = settingsFor(shot,choices);
+    const model = choices.find(item=>item.id === settings.model);
+    const refresh = canvas?.render || renderAnimation;
     const locked = running.has(shot) || Boolean(shot.wanJob);
     const change = (key, value) => {
       shot.animationSettings = key === "model" ? {model:value} : {...settings,[key]:value};
       void save();
-      renderAnimation();
-      workspace.querySelector('[data-wan-setting="' + key + '"] select')?.focus();
+      refresh();
+      (canvas?.container || workspace).querySelector('[data-wan-setting="' + key + '"] select')?.focus();
     };
     const addField = (key,text,options,disabled = false) => {
       const field = selectField(text,options,String(settings[key]),locked || disabled,value=>change(key,
@@ -76,8 +96,7 @@
       field.dataset.wanSetting = key;
       label.append(field);
     };
-    label.append(title);
-    addField("model","视频生成模型",models.map(item=>[item.id,item.name]));
+    addField("model","视频生成模型",choices.map(item=>[item.id,item.name]),choices.length === 1);
     addField("resolution","视频分辨率",Object.keys(model.price).map(value=>[value,value]));
     addField("duration","动画时长",Array.from({length:model.max-model.min+1},(_,i)=>{
       const seconds = model.min + i;
@@ -88,16 +107,17 @@
     }
     const info = document.createElement("small");
     info.textContent = settings.resolution + " · " + settings.duration + " 秒 · " +
-      (settings.audio ? "有声" : "无声") + " · 本次 " + estimatedCost(model,settings) + " 积分";
+      (model.id === "reference" ? "有声" : settings.audio ? "有声" : "无声") + " · 本次 " + estimatedCost(model,settings) + " 积分";
     label.append(info);
     const actions = document.createElement("div");
     actions.className = "actions";
     const generate = document.createElement("button");
     generate.type = "button";
     generate.className = "button primary";
-    generate.textContent = running.has(shot) ? "生成处理中…" : shot.wanJob ? "继续查询动画" : "生成动画";
-    generate.disabled = running.has(shot) || (!shot.wanJob && !canAnimate(shot));
-    generate.onclick = () => void animate(shot);
+    generate.textContent = running.has(shot) ? "生成处理中…" : shot.wanJob ? "继续查询视频" : canvas ? "生成视频" : "生成动画";
+    const inputError = canvas && !inputs.prompt ? "请连接有内容的文本或分镜节点。" : "";
+    generate.disabled = running.has(shot) || (!shot.wanJob && (canvas ? Boolean(inputError) : !canAnimate(shot)));
+    generate.onclick = () => void animate(shot,settings,model,canvas,inputs);
     actions.append(generate);
     if (shot.video instanceof Blob && shot.videoName?.includes("动画-")) {
       const saveClip = document.createElement("button");
@@ -109,9 +129,21 @@
     }
     const status = document.createElement("small");
     status.setAttribute("role","status");
-    status.textContent = messages.get(shot) || (shot.wanJob ? "已提交任务，可继续查询。" : canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
-    panel.append(label,actions,status);
-    tools.before(panel);
+    status.textContent = messages.get(shot) || (shot.wanJob ? "已提交任务，可继续查询。" :
+      canvas ? inputError : canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
+    if (canvas) {
+      const summary = document.createElement("small");
+      summary.textContent = "输入：" + (inputs.prompt ? "文本" : "无文本") +
+        (inputs.image ? " · 首帧图" : "") + (inputs.references.length ? " · " + inputs.references.length + " 张参考图" : "");
+      label.append(summary);
+      if (inputs.references.length) {
+        const hints = document.createElement("small");
+        hints.textContent = inputs.references.map((_,index)=>"图" + (index+1) + " · " + inputs.referenceNames[index]).join(" / ");
+        label.append(hints);
+      }
+    }
+    label.append(actions,status);
+    return label;
   }
 
   function animationPrompt(shot, settings, limit) {
@@ -125,43 +157,47 @@
     return Array.from(parts.filter(Boolean).join("\n")).slice(0,limit).join("");
   }
 
-  async function animate(shot) {
+  async function animate(shot,settings,model,canvas,inputs) {
     if (running.has(shot)) return;
     const originalVideo = shot.video;
-    const originalImage = shot.image;
-    const settings = settingsFor(shot);
-    const model = models.find(item=>item.id === settings.model);
-    if (!shot.wanJob && (!canAnimate(shot) ||
+    const originalImage = canvas ? (shot.wanJob ? shot.pendingPoster || "" : inputs.image || inputs.references[0] || "") : shot.image;
+    const exists = canvas?.exists || (()=>project.shots.includes(shot));
+    const refresh = canvas?.render || (()=>{ if (project.shots[selected] === shot) renderAnimation(); });
+    if (!shot.wanJob && ((canvas ? !inputs.prompt : !canAnimate(shot)) ||
         !window.confirm("用" + model.name + "生成 " + settings.resolution + "、" + settings.duration +
           " 秒动画，将预扣 " + estimatedCost(model,settings) + " 积分。生成失败会退回积分。"
-          + (originalVideo ? "生成成功后将替换本镜现有视频。" : "") + "确认生成？"))) return;
+          + (originalVideo ? "生成成功后将替换现有视频。" : "") + "确认生成？"))) return;
     const report = message => {
       messages.set(shot,message);
-      if (project.shots[selected] === shot) renderAnimation();
+      refresh();
     };
     running.add(shot);
-    report(shot.wanJob ? "正在查询任务…" : "正在提交首帧…");
+    report(shot.wanJob ? "正在查询任务…" : "正在提交素材…");
     try {
       if (!shot.wanJob) {
         const requestId = shot.videoRequestId || crypto.randomUUID();
         shot.videoRequestId = requestId;
         shot.animationSettings = settings;
+        if (canvas) shot.pendingPoster = originalImage;
         await save();
-        const response = await animationRequest({action:"create",requestId,image:originalImage,
-          prompt:animationPrompt(shot,settings,model.promptLimit),...settings});
+        const prompt = canvas ? Array.from(inputs.prompt).slice(0,model.promptLimit).join("") :
+          animationPrompt(shot,settings,model.promptLimit);
+        const response = await animationRequest({action:"create",requestId,image:canvas ? inputs.image : originalImage,prompt,
+          ...(canvas ? {references:inputs.references} : {}),...settings});
         const {job} = await response.json();
-        if (!project.shots.includes(shot)) return;
+        if (!exists()) return;
         delete shot.videoRequestId;
         shot.wanJob = job;
         await save();
       }
       const job = shot.wanJob;
       for (let attempt = 0; attempt < 40; attempt++) {
-        if (!enabled || !project.shots.includes(shot)) return;
+        if (!enabled || !exists()) return;
         const response = await animationRequest({action:"status",job});
         const {state} = await response.json();
         if (state === "failed" || state === "expired") {
           delete shot.wanJob;
+          delete shot.pendingPoster;
           void save();
           report(state === "failed" ? "动画生成失败。若已预扣积分，已退回钱包。" : "任务已结束或过期，可重新提交。");
           return;
@@ -172,6 +208,7 @@
             const result = await output.json();
             if (result.state === "expired") {
               delete shot.wanJob;
+              delete shot.pendingPoster;
               void save();
               report("视频下载链接已过期，可重新生成。");
               return;
@@ -179,10 +216,10 @@
             throw Error("暂时无法读取视频，请继续查询。");
           }
           const video = await output.blob();
-          const name = "动画-" + (shot.name || "未命名分镜") + ".mp4";
+          const name = "动画-" + (shot.name || shot.title || "未命名分镜") + ".mp4";
           const clip = await loadClip(video);
           try {
-            if (!project.shots.includes(shot) || shot.image !== originalImage || shot.video !== originalVideo) {
+            if (!exists() || (!canvas && shot.image !== originalImage) || shot.video !== originalVideo) {
               download(video,name);
               delete shot.wanJob;
               void save();
@@ -196,13 +233,15 @@
             shot.videoName = name;
             shot.videoDuration = duration;
             delete shot.wanJob;
+            delete shot.pendingPoster;
           } finally {
             releaseClip(clip);
           }
           await save();
-          if (step === "edit" && project.shots[selected] === shot) refreshShot();
-          report("动画已放入本镜，可播放或下载。");
-          notify("动画已生成并加入分镜。");
+          if (!canvas && step === "edit" && project.shots[selected] === shot) refreshShot();
+          canvas?.completed();
+          report(canvas ? "视频已生成，可在节点中播放或下载。" : "动画已放入本镜，可播放或下载。");
+          notify(canvas ? "视频已加入画布节点。" : "动画已生成并加入分镜。");
           return;
         }
         report("正在生成动画，可先编辑其他分镜。");
@@ -212,14 +251,17 @@
     } catch (error) {
       if (shot.videoRequestId && error.status >= 400 && error.status < 500) {
         delete shot.videoRequestId;
+        delete shot.pendingPoster;
         void save();
       }
       report(error.message || "请求未完成。");
     } finally {
       running.delete(shot);
-      if (project.shots[selected] === shot) renderAnimation();
+      refresh();
     }
   }
+
+  window.manjuCanvasVideo = {generationForm,isBusy:node=>running.has(node)};
 
   async function checkAccess() {
     const version = ++accessCheck;
@@ -233,7 +275,8 @@
       models = Array.isArray(data.models) ? data.models : [];
       enabled = data.enabled === true && models.length > 0;
       renderAnimation();
-    } catch { /* Animation is shown only to the pilot administrator. */ }
+    } catch { /* Video generation requires site access. */ }
+    finally { if (version === accessCheck) window.dispatchEvent(new Event("manju-video-access")); }
   }
 
   new MutationObserver(renderAnimation).observe(workspace,{childList:true});

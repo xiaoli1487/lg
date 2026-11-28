@@ -20,7 +20,7 @@
     '<button type="button" class="button secondary" data-canvas="shot">添加分镜卡片</button></div>' +
     '<div class="canvas-actions"><button type="button" class="button secondary" data-canvas="text">＋ 文本节点</button>' +
     '<button type="button" class="button secondary" data-canvas="image">＋ 图片节点</button><input type="file" accept="image/*" multiple hidden>' +
-    '<button type="button" class="button secondary" data-canvas="video">＋ 视频节点</button><input type="file" accept="video/*,.mp4,.webm,.mov" multiple hidden>' +
+    '<button type="button" class="button secondary" data-canvas="video">＋ 视频节点</button><button type="button" class="button quiet" data-canvas="upload-video">导入视频</button><input type="file" accept="video/*,.mp4,.webm,.mov" multiple hidden>' +
     '<button type="button" class="button secondary" data-canvas="link" aria-pressed="false">连线</button>' +
     '<button type="button" class="button quiet" data-canvas="remove" disabled>删除选中</button></div></div>' +
     '<div class="canvas-surface" tabindex="0" aria-label="画布"><canvas class="canvas-lines" aria-hidden="true"></canvas><div class="canvas-world"></div>' +
@@ -31,6 +31,12 @@
     '<button type="button" class="button quiet" data-canvas="in" aria-label="放大">＋</button>' +
     '<button type="button" class="button quiet" data-canvas="fit">适应内容</button></div></div></div>';
   editor.after(page);
+  const videoDialog = document.createElement("dialog");
+  videoDialog.className = "canvas-video-dialog";
+  videoDialog.setAttribute("aria-label","视频节点设置");
+  videoDialog.innerHTML = '<form method="dialog"><button class="button quiet">返回画布</button></form><div class="canvas-video-settings"></div>';
+  page.append(videoDialog);
+  const videoSettings = videoDialog.querySelector(".canvas-video-settings");
 
   const surface = page.querySelector(".canvas-surface");
   const world = page.querySelector(".canvas-world");
@@ -50,10 +56,14 @@
   const kinds = {text:"文本",image:"图片",video:"视频",shot:"分镜"};
   let board, picked, linking = false, linkFrom, drag, saveTimer;
   const cards = new Map();
+  const normalized = new WeakSet();
+  const ports = {prompt:"文本",frame:"首帧",reference:"参考图"};
+  let wireDrag, inspectedVideo;
   const videoUrls = new Map();
 
   function boardForProject() {
     const source = project.canvasBoard;
+    if (source && normalized.has(source)) return source;
     const ids = new Set();
     const nodes = Array.isArray(source?.nodes) ? source.nodes.slice(0,maxCards).flatMap(node=>{
       const kind = node?.kind === "note" ? "text" : node?.kind;
@@ -64,15 +74,20 @@
         title:String(node.title || kinds[kind]).slice(0,160), text:String(node.text ?? "").slice(0,12000),
         image:isImage(image) ? image : "", video:kind === "video" && isVideo(node.video) ? node.video : null,
         shotId:typeof node.shotId === "string" ? node.shotId : "",
-        sourceNode:typeof node.sourceNode === "string" ? node.sourceNode : ""}];
+        sourceNode:typeof node.sourceNode === "string" ? node.sourceNode : "",
+        ...(kind === "video" ? {animationSettings:node.animationSettings,videoName:node.videoName,videoDuration:finite(node.videoDuration),
+          videoPoster:isImage(node.videoPoster) ? node.videoPoster : "",wanJob:node.wanJob,
+          videoRequestId:node.videoRequestId, pendingPoster:isImage(node.pendingPoster) ? node.pendingPoster : ""} : {})}];
     }) : [];
     const links = Array.isArray(source?.links) ? source.links.slice(0,maxLinks).filter(link=>
       link && link.from !== link.to && ids.has(link.from) && ids.has(link.to)
-    ).map(({from,to})=>({from,to})) : [];
-    return project.canvasBoard = {
+    ).map(({from,to,input})=>Object.hasOwn(ports,input) ? {from,to,input} : {from,to}) : [];
+    const result = {
       nodes,links,view:{x:finite(source?.view?.x,36),y:finite(source?.view?.y,36),
         z:clamp(finite(source?.view?.z,1),minZoom,maxZoom)}
     };
+    normalized.add(result);
+    return project.canvasBoard = result;
   }
 
   function persist() {
@@ -119,6 +134,8 @@
   function close(returnFocus = false) {
     if (page.hidden) return;
     if (drag) stopDrag(true);
+    if (videoDialog.open) videoDialog.close();
+    wireDrag = null;
     persist();
     releaseVideos();
     page.hidden = true;
@@ -157,19 +174,112 @@
     const nodes = new Map(board.nodes.map(node=>[node.id,node]));
     ctx.lineWidth = 2;
     ctx.strokeStyle = getComputedStyle(surface).getPropertyValue("--accent").trim() || "#b8a6ff";
-    for (const link of board.links) {
-      const a = nodes.get(link.from), b = nodes.get(link.to);
-      if (!a || !b) continue;
-      const left = a.x <= b.x;
-      const ax = (a.x + (left ? width : 0)) * z + x, ay = (a.y + height/2) * z + y;
-      const bx = (b.x + (left ? 0 : width)) * z + x, by = (b.y + height/2) * z + y;
-      const bend = Math.max(24,Math.abs(bx-ax)*.42) * (left ? 1 : -1);
+    const curve = (ax,ay,bx,by,direction,color) => {
+      const bend = Math.max(24,Math.abs(bx-ax)*.42) * direction;
+      ctx.strokeStyle = color;
       ctx.beginPath();
       ctx.moveTo(ax,ay);
       ctx.bezierCurveTo(ax+bend,ay,bx-bend,by,bx,by);
       ctx.stroke();
+    };
+    const accent = ctx.strokeStyle;
+    for (const link of board.links) {
+      const a = nodes.get(link.from), b = nodes.get(link.to);
+      if (!a || !b) continue;
+      if (link.input && b.kind === "video") {
+        curve((a.x+width-11)*z+x,(a.y+17)*z+y,(b.x+11)*z+x,(b.y+portY(link.input))*z+y,1,
+          {prompt:"#9475ed",frame:"#2aa991",reference:"#d28b35"}[link.input]);
+      } else {
+        const left = a.x <= b.x;
+        curve((a.x+(left ? width : 0))*z+x,(a.y+height/2)*z+y,
+          (b.x+(left ? 0 : width))*z+x,(b.y+height/2)*z+y,left ? 1 : -1,accent);
+      }
+    }
+    const source = wireDrag && nodes.get(wireDrag.from);
+    if (source && wireDrag.moved) {
+      const rect = surface.getBoundingClientRect();
+      curve((source.x+width-11)*z+x,(source.y+17)*z+y,wireDrag.x-rect.left,wireDrag.y-rect.top,1,accent);
     }
   }
+
+  function portY(input) {
+    return 50 + Object.keys(ports).indexOf(input)*27;
+  }
+
+  function canConnect(source,input) {
+    return input === "prompt" ? ["text","shot"].includes(source?.kind) :
+      ["image","shot"].includes(source?.kind) && isImage(source.image);
+  }
+
+  function connect(from,target,input) {
+    const source = board.nodes.find(node=>node.id === from);
+    if (!canConnect(source,input)) {
+      showMessage(input === "prompt" ? "文本口接文字或分镜节点。" : "图片口接图片或带图的分镜节点。");
+      return;
+    }
+    const existing = board.links.findIndex(link=>link.from === from && link.to === target.id && link.input === input);
+    if (existing >= 0) {
+      board.links.splice(existing,1);
+    } else {
+      if (input === "reference" && board.links.filter(link=>link.to === target.id && link.input === input).length >= 5) {
+        showMessage("每个视频节点最多连接 5 张参考图。");
+        return;
+      }
+      const previousFrame = input === "frame" && board.links.findIndex(link=>link.to === target.id && link.input === input);
+      if (input === "frame" && previousFrame >= 0) board.links.splice(previousFrame,1);
+      if (board.links.length >= maxLinks) { showMessage("画布连线数量已满。"); return; }
+      board.links.push({from,to:target.id,input});
+    }
+    linking = false;
+    linkFrom = null;
+    picked = target.id;
+    updateSelection();
+    draw();
+    persist();
+    showMessage(existing >= 0 ? "已断开" + ports[input] + "连接。" : "已连接" + ports[input] + "到视频节点。");
+  }
+
+  function videoInputs(node) {
+    const sources = new Map(board.nodes.map(item=>[item.id,item]));
+    const wired = input => board.links.filter(link=>link.to===node.id && link.input===input)
+      .map(link=>sources.get(link.from)).filter(source=>canConnect(source,input));
+    const image = wired("frame")[0]?.image || "";
+    const referenceSources = new Map(wired("reference").map(source=>[source.image,source.title]));
+    const references = [...referenceSources.keys()];
+    const referenceNames = [...referenceSources.values()];
+    const prompt = [...new Set(wired("prompt").map(source=>source.text.trim()).filter(Boolean))].join("\n\n");
+    return {image,references,referenceNames,prompt};
+  }
+
+  function openVideo(node) {
+    inspectedVideo = node;
+    renderVideoSettings();
+    if (!videoDialog.open) videoDialog.showModal();
+  }
+
+  function renderVideoSettings() {
+    const node = inspectedVideo;
+    if (!node) return;
+    const context = {
+      title:node.title,container:videoSettings,inputs:()=>videoInputs(node),
+      exists:()=>project.canvasBoard === board && board.nodes.includes(node),
+      render:()=>{ if (videoDialog.open && inspectedVideo === node) renderVideoSettings(); },
+      completed:()=>{
+        const card = cards.get(node.id);
+        if (!card) return;
+        card.querySelector("video")?.pause();
+        card.remove();
+        if (videoUrls.has(node.id)) URL.revokeObjectURL(videoUrls.get(node.id));
+        videoUrls.delete(node.id);
+        cards.delete(node.id);
+        render();
+      }
+    };
+    const form = window.manjuCanvasVideo?.generationForm(node,context);
+    videoSettings.replaceChildren(form || "当前站点未启用视频生成。");
+  }
+
+  window.addEventListener("manju-video-access",()=>{ if (videoDialog.open) renderVideoSettings(); });
 
   function updateSelection() {
     for (const [id,card] of cards) {
@@ -178,7 +288,7 @@
     }
     action("remove").disabled = !picked;
     action("link").setAttribute("aria-pressed",String(linking));
-    showMessage(linking ? (linkFrom ? "点选另一张卡片完成连线" : "点选连线的起始卡片") : "");
+    showMessage(linking ? (linkFrom ? "选择视频节点上的文本、首帧或参考图接口。" : "点选连线的起始卡片") : "");
   }
 
   function interact(node) {
@@ -186,6 +296,10 @@
     if (linking) {
       if (!linkFrom) linkFrom = node.id;
       else if (linkFrom !== node.id) {
+        if (node.kind === "video") {
+          showMessage("请点视频节点上的文本、首帧或参考图输入口。");
+          return;
+        }
         const from = linkFrom, to = node.id;
         const existing = board.links.findIndex(link=>(link.from === from && link.to === to) || (link.from === to && link.to === from));
         if (existing >= 0) board.links.splice(existing,1);
@@ -236,6 +350,41 @@
       head.title = node.title;
       card.setAttribute("aria-label",node.title);
       card.append(head);
+      if (node.kind !== "video") {
+        const out = document.createElement("button");
+        out.type = "button";
+        out.className = "canvas-port-out";
+        out.setAttribute("aria-label",node.title+" · 输出");
+        out.title = "拖到视频输入口，或点选后连接";
+        out.onclick = ()=>{
+          linking = linkFrom !== node.id;
+          linkFrom = linking ? node.id : null;
+          updateSelection();
+        };
+        out.onpointerdown = event=>{
+          if (event.button === 0) wireDrag = {from:node.id,pointer:event.pointerId,x:event.clientX,y:event.clientY};
+        };
+        card.append(out);
+      }
+      if (node.kind === "video") {
+        const generate = document.createElement("button");
+        generate.type = "button";
+        generate.className = "button primary canvas-extract";
+        generate.textContent = "生成视频";
+        generate.onclick = ()=>openVideo(node);
+        card.append(generate);
+        for (const [input,label] of Object.entries(ports)) {
+          const port = document.createElement("button");
+          port.type = "button";
+          port.className = "canvas-port-in";
+          port.dataset.canvasInput = input;
+          port.textContent = label;
+          port.title = "连接"+label+"；同一条线再次连接可断开";
+          port.style.top = portY(input)+"px";
+          port.onclick = ()=>linkFrom ? connect(linkFrom,node,input) : showMessage("先点素材节点右上角的输出圆点。");
+          card.append(port);
+        }
+      }
       if (node.kind === "text") {
         const input = document.createElement("textarea");
         input.setAttribute("aria-label","文本节点内容");
@@ -252,10 +401,10 @@
           video.controls = true;
           video.playsInline = true;
           video.preload = "none";
-          video.poster = node.image;
+          video.poster = node.videoPoster || node.image;
           video.addEventListener("error",()=>showMessage("无法播放此视频，请试试 H.264 MP4 或 WebM。"));
           video.src = url;
-          card.append(video);
+          card.insertBefore(video,card.querySelector(".canvas-extract"));
         } else if (node.image) {
           const image = document.createElement("img");
           image.src = node.image;
@@ -327,11 +476,14 @@
     const choices = [
       ["text","分镜文字",text.trim() && {text:text.slice(0,12000)}],
       ["image","首帧图",isImage(image) && {image}],
-      ["video","分镜视频",isVideo(shot?.video) && {video:shot.video,image:isImage(image) ? image : ""}]
+      ["video","分镜视频",isVideo(shot?.video) && {video:shot.video,image:isImage(image) ? image : ""}],
+      ["image","场景参考图",isImage(shot?.sceneRef) && {image:shot.sceneRef}],
+      ["image","画面参考图",isImage(shot?.visualRef) && {image:shot.visualRef}]
     ];
     const available = choices.filter(([, ,payload])=>payload);
     const existing = node ? board.nodes.filter(item=>item.sourceNode === node.id) : [];
-    const missing = available.filter(([kind])=>!existing.some(item=>item.kind === kind));
+    const missing = available.filter(([kind,title])=>!existing.some(item=>item.kind === kind &&
+      item.title.endsWith(" · " + title)));
     if (!missing.length) {
       if (existing.length) fit([node,...existing]);
       showMessage(available.length ? "该分镜的素材已在画布上。" : "该分镜暂无可导入的素材。");
@@ -347,7 +499,7 @@
       const x = node.x + width + 64;
       let y = node.y + index*(height+32);
       while (board.nodes.some(item=>Math.abs(item.x-x)<width+18 && Math.abs(item.y-y)<height+18)) y += height+32;
-      return add(kind,{title:(node.title + " · " + title).slice(0,160),sourceNode:node.id,...payload},
+      return add(kind,{title:node.title.slice(0,157-title.length) + " · " + title,sourceNode:node.id,...payload},
         {x:x+width/2,y:y+height/2});
     });
     for (const item of added) {
@@ -422,6 +574,11 @@
 
   function removeSelected() {
     if (!picked) return;
+    const node = board.nodes.find(item=>item.id === picked);
+    if (node?.wanJob || window.manjuCanvasVideo?.isBusy(node)) {
+      showMessage("请先在视频节点中查询任务结果。");
+      return;
+    }
     board.nodes = board.nodes.filter(node=>node.id !== picked);
     board.links = board.links.filter(link=>link.from !== picked && link.to !== picked);
     if (picked === linkFrom) linkFrom = null;
@@ -450,8 +607,15 @@
     persist();
     cards.get(node.id)?.querySelector("textarea").focus();
   };
+  action("video").onclick = ()=>{
+    const node = add("video",{title:"视频生成"});
+    if (!node) return;
+    render();
+    fit();
+    showMessage("把素材节点的输出连到视频节点，再点「生成视频」。");
+  };
   for (const kind of ["image","video"]) {
-    const button = action(kind), input = button.nextElementSibling;
+    const button = action(kind === "video" ? "upload-video" : kind), input = button.nextElementSibling;
     button.onclick = ()=>input.click();
     input.onchange = ()=>{
       const files = [...input.files];
@@ -508,6 +672,11 @@
     surface.classList.add("is-dragging");
   });
   surface.addEventListener("pointermove",event=>{
+    if (wireDrag?.pointer === event.pointerId) {
+      wireDrag.moved ||= Math.hypot(event.clientX-wireDrag.x,event.clientY-wireDrag.y)>4;
+      if (wireDrag.moved) { wireDrag.x = event.clientX; wireDrag.y = event.clientY; draw(); }
+      return;
+    }
     if (!drag || drag.pointer !== event.pointerId) return;
     const dx = event.clientX-drag.startX, dy = event.clientY-drag.startY;
     if (!drag.moved && Math.hypot(dx,dy)<3) return;
@@ -518,6 +687,17 @@
     if (drag.node) setPosition(drag.node,cards.get(drag.node.id));
     draw();
   });
+  window.addEventListener("pointerup",event=>{
+    if (wireDrag?.pointer !== event.pointerId) return;
+    const {from,moved} = wireDrag;
+    wireDrag = null;
+    if (!moved) return;
+    const port = document.elementFromPoint(event.clientX,event.clientY)?.closest("[data-canvas-input]");
+    const node = board.nodes.find(item=>item.id === port?.closest("[data-node]")?.dataset.node);
+    if (node) connect(from,node,port.dataset.canvasInput);
+    draw();
+  });
+  window.addEventListener("pointercancel",()=>{ if (wireDrag) { wireDrag = null; draw(); } });
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) {
     surface.addEventListener(type,event=>{ if (drag?.pointer === event.pointerId) stopDrag(true); });
   }

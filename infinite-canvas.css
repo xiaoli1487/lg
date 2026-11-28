@@ -162,3 +162,31 @@
   .canvas-tools .button { min-height:34px; padding:5px 8px; font-size:12px; }
   .canvas-tools select { min-height:34px; }
 }
+
+.canvas-port-out, .canvas-port-in {
+  position:absolute;
+  z-index:1;
+  border:1px solid var(--accent);
+  background:var(--panel);
+  color:var(--text);
+  cursor:crosshair;
+  touch-action:none;
+}
+.canvas-port-out { top:9px; right:4px; width:15px; height:15px; border-radius:50%; background:var(--accent); }
+.canvas-card:has(.canvas-port-out) .canvas-card-head { padding-right:24px; }
+.canvas-port-in { left:4px; transform:translateY(-50%); border-radius:12px; padding:2px 7px; font-size:11px; line-height:16px; }
+.canvas-port-in[data-canvas-input="frame"] { border-color:#2aa991; }
+.canvas-port-in[data-canvas-input="reference"] { border-color:#d28b35; }
+.canvas-video { padding-left:61px; }
+.canvas-video .canvas-extract { margin-top:auto; }
+.canvas-video-dialog {
+  width:min(440px,calc(100% - 24px));
+  max-height:85dvh;
+  padding:16px;
+  background:var(--panel);
+  color:var(--text);
+  border:1px solid var(--line);
+  border-radius:12px;
+}
+.canvas-video-dialog > form { display:flex; justify-content:flex-end; margin-bottom:8px; }
+.canvas-video-dialog .field { margin-bottom:6px; }

@@ -4,6 +4,7 @@
   const pendingText = "生成耗时较长，完成后自动显示";
   let enabled = false;
   let manualEnabled = false;
+  let deliveryAdmin = false;
   let models = [];
   let accessCheck = 0;
 
@@ -79,7 +80,7 @@
     const pendingModel = shot.wanJob && shot.animationSettings?.model;
     const mode = pendingModel || (inputs?.references.length ? "reference" :
       canvas && !inputs.image ? "narrative" : "");
-    const choices = (models.length ? models : [{id:mode || "economy",name:"由管理员制作",min:5,max:5,promptLimit:20000,price:{"480P":[0]}}])
+    const choices = (models.length ? models : [{id:mode || "economy",name:"标准版",min:5,max:5,promptLimit:20000,price:{"480P":[0]}}])
       .filter(item=>mode ? item.id === mode : item.id !== "reference");
     if (!choices.length) {
       label.append("当前视频服务不支持这组输入。");
@@ -113,7 +114,9 @@
     const info = document.createElement("small");
     info.textContent = settings.resolution + " · " + settings.duration + " 秒 · " +
       (model.id === "reference" ? "有声" : settings.audio ? "有声" : "无声") + " · 本次 " + estimatedCost(model,settings) + " 积分";
-    if (enabled && !shot.wanJob?.startsWith("manual.")) label.append(info);
+    const manualJob = shot.wanJob?.startsWith("manual.");
+    const queueDelivery = !shot.wanJob && manualEnabled && (!deliveryAdmin || !enabled);
+    if (enabled && !manualJob && !queueDelivery) label.append(info);
     if (manualEnabled && shot.wanJob?.startsWith("manual.") && !running.has(shot) && !messages.has(shot)) {
       queueMicrotask(()=>{ if (!messages.has(shot)) void animate(shot,settings,model,canvas,inputs,true); });
     }
@@ -122,16 +125,16 @@
     const generate = document.createElement("button");
     generate.type = "button";
     generate.className = "button primary";
-    generate.textContent = running.has(shot) ? pendingText : shot.wanJob ? "继续查询视频" : canvas ? "生成视频" : "生成动画";
+    generate.textContent = running.has(shot) ? pendingText : shot.wanJob ? "继续查询视频" : canvas || queueDelivery ? "生成视频" : "生成动画";
     const inputError = canvas && !inputs.prompt ? "请连接有内容的文本或分镜节点。" : "";
-    generate.disabled = running.has(shot) || (!shot.wanJob && (canvas ? Boolean(inputError) : !canAnimate(shot)));
-    generate.onclick = () => void animate(shot,settings,model,canvas,inputs,shot.wanJob?.startsWith("manual."));
-    if (enabled || shot.wanJob?.startsWith("manual.")) actions.append(generate);
-    if (manualEnabled && !shot.wanJob) {
+    generate.disabled = running.has(shot) || (!shot.wanJob && (canvas ? Boolean(inputError) : !queueDelivery && !canAnimate(shot)));
+    generate.onclick = () => void animate(shot,settings,model,canvas,inputs,Boolean(manualJob || queueDelivery));
+    if (enabled || manualJob || queueDelivery) actions.append(generate);
+    if (deliveryAdmin && manualEnabled && enabled && !shot.wanJob) {
       const manual = document.createElement("button");
       manual.type = "button";
       manual.className = "button secondary";
-      manual.textContent = "提交人工制作";
+      manual.textContent = "加入交付队列";
       manual.disabled = running.has(shot) || Boolean(inputError);
       manual.onclick = ()=>void animate(shot,settings,model,canvas,inputs,true);
       actions.append(manual);
@@ -147,7 +150,7 @@
     const status = document.createElement("small");
     status.setAttribute("role","status");
     status.textContent = messages.get(shot) || (shot.wanJob ? pendingText + "。点击「继续查询视频」可恢复自动查询。" :
-      canvas ? inputError : canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
+      canvas ? inputError : queueDelivery || canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
     if (canvas) {
       const summary = document.createElement("small");
       summary.textContent = "输入：" + (inputs.prompt ? "文本" : "无文本") +
@@ -181,7 +184,7 @@
     const exists = canvas?.exists || (()=>project.shots.includes(shot));
     const refresh = canvas?.render || (()=>{ if (project.shots[selected] === shot) renderAnimation(); });
     if (!shot.wanJob && manual &&
-        !window.confirm("将本次的提示词和图片提交给管理员制作视频。本次提交不扣积分。确认提交？")) return;
+        !window.confirm("将本次提示词和图片提交给漫剧工坊处理。本次提交不扣积分。确认生成？")) return;
     if (!shot.wanJob && !manual && ((canvas ? !inputs.prompt : !canAnimate(shot)) ||
         !window.confirm("用" + model.name + "生成 " + settings.resolution + "、" + settings.duration +
           " 秒动画，将预扣 " + estimatedCost(model,settings) + " 积分。生成失败会退回积分。"
@@ -222,7 +225,7 @@
           delete shot.wanJob;
           delete shot.pendingPoster;
           void save();
-          report(manual ? "管理员未能完成此任务，可重新提交。" :
+          report(manual ? "本次视频任务未完成，可重新提交。" :
             state === "failed" ? "动画生成失败。若已预扣积分，已退回钱包。" : "任务已结束或过期，可重新提交。");
           return;
         }
@@ -290,16 +293,17 @@
 
   async function checkAccess() {
     const version = ++accessCheck;
-    enabled = manualEnabled = false;
+    enabled = manualEnabled = deliveryAdmin = false;
     renderAnimation();
     const [video,manual] = await Promise.allSettled([
       animationRequest({action:"access"}).then(response=>response.json()),
-      requestGeneration("/manual-video",{action:"access"}).then(response=>response.ok)
+      requestGeneration("/manual-video",{action:"access"}).then(async response=>response.ok ? await response.json() : null)
     ]);
     if (version !== accessCheck) return;
     models = video.status === "fulfilled" && Array.isArray(video.value.models) ? video.value.models : [];
     enabled = video.status === "fulfilled" && video.value.enabled === true && models.length>0;
-    manualEnabled = manual.status === "fulfilled" && manual.value;
+    manualEnabled = manual.status === "fulfilled" && Boolean(manual.value);
+    deliveryAdmin = manualEnabled && manual.value.admin === true;
     renderAnimation();
     window.dispatchEvent(new Event("manju-video-access"));
   }

@@ -753,7 +753,7 @@ async function save() {
   const draft = {project, step, selected, at};
   let fallback = false;
   try {
-    if (!project.shots.some(shot => shot.video instanceof Blob)) {
+    if (!videoHolders(project).some(item => item.video instanceof Blob)) {
       localStorage.setItem(recoveryKey, JSON.stringify(draft, (key, value) =>
         key === "image" && assets.includes(value) ? "frame-" + (assets.indexOf(value) + 1) + ".jpg" : value));
       fallback = true;
@@ -1891,11 +1891,31 @@ async function exportVideo() {
   }
 }
 
-async function backupProject() {
+function videoHolders(project) {
+  const nodes = project.canvasBoard?.nodes;
+  return [...project.shots, ...(Array.isArray(nodes) ? nodes.slice(0,200).filter(node=>node?.kind === "video") : [])];
+}
+
+async function prepareProjectSnapshot() {
   const snapshot = structuredClone(project);
-  for (const shot of snapshot.shots) {
-    if (shot.video instanceof Blob) shot.video = await readFile(shot.video);
+  for (const item of videoHolders(snapshot)) {
+    if (item.video instanceof Blob) item.video = await readFile(item.video);
   }
+  return snapshot;
+}
+
+async function restoreProjectVideos(project) {
+  for (const item of videoHolders(project)) {
+    if (!item.video || item.video instanceof Blob) continue;
+    if (typeof item.video !== "string" || !/^data:(?:video\/[\w.+-]+|application\/octet-stream)?;base64,/.test(item.video)) {
+      throw new Error("视频数据错误");
+    }
+    item.video = await (await fetch(item.video)).blob();
+  }
+}
+
+async function backupProject() {
+  const snapshot = await prepareProjectSnapshot();
   const data = JSON.stringify({format:"manju-project",version:1,project:snapshot});
   download(new Blob([data], {type:"application/json"}), (snapshot.title || "我的漫剧") + ".manju.json");
 }
@@ -1903,9 +1923,8 @@ async function backupProject() {
 async function savePortablePage() {
   if (!ready || !pageTemplate) return;
   if (!Object.keys(bundledImages).length) { await backupProject(); notify("已导出项目备份，可在工坊中恢复。"); return; }
-  const snapshot = structuredClone(project);
+  const snapshot = await prepareProjectSnapshot();
   const state = {key:crypto.randomUUID(), at:Date.now(), project:snapshot, step, selected};
-  for (const shot of snapshot.shots) if (shot.video instanceof Blob) shot.video = await readFile(shot.video);
   const safeJSON = JSON.stringify(state).replaceAll("<", "\\u003c");
   const marker = '<script id="saved-project" type="application/json">' + safeJSON + '</' + 'script>';
   const html = "<!doctype html>\n" + pageTemplate.replace("<head>", () => "<head>" + marker);
@@ -1924,11 +1943,8 @@ async function restoreProject(file) {
     if ([shot.sceneRef,shot.visualRef].some(src=>src && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(src))) throw new Error("参考图数据错误");
     if ((shot.image !== "" && !safeImage(shot.image)) || !Number.isFinite(shot.seconds) || shot.seconds <= 0 || typeof shot.line !== "string" ||
         (shot.videoPoster && !safeImage(shot.videoPoster))) throw new Error("分镜数据错误");
-    if (shot.video) {
-      if (!/^data:(?:video\/[\w.+-]+|application\/octet-stream)?;base64,/.test(shot.video)) throw new Error("视频数据错误");
-      shot.video = await (await fetch(shot.video)).blob();
-    }
   }
+  await restoreProjectVideos(restored);
   for (const role of restored.roles || []) {
     if (!/^[\w-]+$/.test(role.id) || !safeImage(role.image) || (role.sheet && !safeImage(role.sheet)) || typeof role.name !== "string") throw new Error("角色数据错误");
   }
@@ -2090,7 +2106,7 @@ function handleAction(action) {
       break;
     }
     case "duplicate":
-      project.shots.splice(selected + 1, 0, { ...shot, name: shot.name + "（副本）" });
+      project.shots.splice(selected + 1, 0, { ...shot, canvasSourceId:undefined, name: shot.name + "（副本）" });
       selected++;
       break;
     case "remove":
@@ -2261,9 +2277,7 @@ async function init() {
     if (saved?.project?.shots?.length) {
       ({ project, step, selected } = saved);
       lastSavedAt = saved.at || 0;
-      for (const shot of project.shots) {
-        if (typeof shot.video === "string" && shot.video.startsWith("data:")) shot.video = await (await fetch(shot.video)).blob();
-      }
+      await restoreProjectVideos(project);
       const formerStyle = project.author?.artStyle?.trim();
       const migratedLook = Object.keys(visualStyles).find(key => visualStyles[key].label === formerStyle) ?? (formerStyle ? "custom" : "cinema");
       project.author = { ...authorSettings(), look: migratedLook, ...project.author };

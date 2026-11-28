@@ -96,7 +96,7 @@
   text-overflow:ellipsis;
   cursor:grab;
 }
-.canvas-note .canvas-card-head { background:var(--active); }
+.canvas-text .canvas-card-head { background:var(--active); }
 .canvas-card textarea {
   flex:1;
   width:100%;
@@ -110,17 +110,21 @@
   resize:none;
 }
 .canvas-card textarea::placeholder { color:var(--muted); }
-.canvas-card img { display:block; width:100%; min-height:0; flex:1; object-fit:contain; background:var(--control); }
-.canvas-shot:has(img) img { height:102px; flex:0 0 102px; object-fit:cover; }
+.canvas-card img, .canvas-card video { display:block; width:100%; min-height:0; flex:1; object-fit:contain; background:var(--control); }
+.canvas-shot img { flex:0 0 66px; height:66px; object-fit:cover; }
 .canvas-shot p {
   margin:0;
+  flex:1;
+  min-height:0;
   padding:8px 10px;
   color:var(--muted);
   font-size:12px;
   line-height:1.5;
   overflow:auto;
   overflow-wrap:anywhere;
+  white-space:pre-wrap;
 }
+.canvas-card .canvas-extract { min-height:29px; flex:none; margin:0 6px 6px; padding:4px 8px; font-size:12px; }
 .canvas-empty {
   position:absolute;
   inset:0;

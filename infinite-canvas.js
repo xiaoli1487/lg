@@ -15,13 +15,14 @@
   page.setAttribute("aria-labelledby","canvas-title");
   page.innerHTML = '<header class="canvas-header"><div><span class="canvas-project"></span><h1 id="canvas-title">无限画布</h1></div>' +
     '<button type="button" class="button secondary" data-canvas="back">返回制作</button></header>' +
-    '<div class="canvas-tools"><div class="canvas-actions"><button type="button" class="button primary" data-canvas="note">＋ 便签</button>' +
-    '<button type="button" class="button secondary" data-canvas="image">导入图片</button><input type="file" accept="image/*" multiple hidden>' +
+    '<div class="canvas-tools"><div class="canvas-actions"><button type="button" class="button primary" data-canvas="text">＋ 文本节点</button>' +
+    '<button type="button" class="button secondary" data-canvas="image">＋ 图片节点</button><input type="file" accept="image/*" multiple hidden>' +
+    '<button type="button" class="button secondary" data-canvas="video">＋ 视频节点</button><input type="file" accept="video/*,.mp4,.webm,.mov" multiple hidden>' +
     '<select aria-label="选择分镜"></select><button type="button" class="button secondary" data-canvas="shot">添加分镜</button></div>' +
     '<div class="canvas-actions"><button type="button" class="button secondary" data-canvas="link" aria-pressed="false">连线</button>' +
     '<button type="button" class="button quiet" data-canvas="remove" disabled>删除选中</button></div></div>' +
     '<div class="canvas-surface" tabindex="0" aria-label="画布"><canvas class="canvas-lines" aria-hidden="true"></canvas><div class="canvas-world"></div>' +
-    '<div class="canvas-empty"><strong>从一张便签开始</strong><span>也可以拖入图片，或从项目里添加分镜。</span></div>' +
+    '<div class="canvas-empty"><strong>添加文本或分镜节点</strong><span>也可以把图片和视频拖到这里。</span></div>' +
     '<div class="canvas-bottom"><span class="canvas-status" role="status"></span><div class="canvas-zoom">' +
     '<button type="button" class="button quiet" data-canvas="out" aria-label="缩小">−</button>' +
     '<button type="button" class="button quiet" data-canvas="reset" aria-label="恢复百分之百">100%</button>' +
@@ -35,28 +36,35 @@
   const empty = page.querySelector(".canvas-empty");
   const status = page.querySelector(".canvas-status");
   const shotSelect = page.querySelector("select");
-  const fileInput = page.querySelector('input[type="file"]');
   const action = name => page.querySelector('[data-canvas="' + name + '"]');
   const width = 232, height = 188;
   const minZoom = .18, maxZoom = 3;
   const maxCards = 200;
+  const maxLinks = 500;
   const clamp = (n,min,max) => Math.max(min,Math.min(max,n));
   const finite = (value,fallback = 0) => Number.isFinite(value) ? value : fallback;
   const isImage = value => typeof value === "string" && /^data:image\/(?:jpeg|png|webp);base64,/.test(value);
+  const isVideo = value => value instanceof Blob && value.size > 0;
+  const kinds = {text:"文本",image:"图片",video:"视频",shot:"分镜"};
   let board, picked, linking = false, linkFrom, drag, saveTimer;
-  let cards = new Map();
+  const cards = new Map();
+  const videoUrls = new Map();
 
   function boardForProject() {
     const source = project.canvasBoard;
     const ids = new Set();
     const nodes = Array.isArray(source?.nodes) ? source.nodes.slice(0,maxCards).flatMap(node=>{
-      if (!node || typeof node.id !== "string" || ids.has(node.id) || !["note","image","shot"].includes(node.kind)) return [];
+      const kind = node?.kind === "note" ? "text" : node?.kind;
+      if (!node || typeof node.id !== "string" || ids.has(node.id) || !Object.hasOwn(kinds,kind)) return [];
       ids.add(node.id);
-      return [{id:node.id,kind:node.kind,x:finite(node.x),y:finite(node.y),
-        title:String(node.title ?? "").slice(0,160), text:String(node.text ?? "").slice(0,2000),
-        image:isImage(node.image) ? node.image : ""}];
+      const image = typeof node.image === "string" ? artSource(node.image) : "";
+      return [{id:node.id,kind,x:finite(node.x),y:finite(node.y),
+        title:String(node.title || kinds[kind]).slice(0,160), text:String(node.text ?? "").slice(0,12000),
+        image:isImage(image) ? image : "", video:kind === "video" && isVideo(node.video) ? node.video : null,
+        shotId:typeof node.shotId === "string" ? node.shotId : "",
+        sourceNode:typeof node.sourceNode === "string" ? node.sourceNode : ""}];
     }) : [];
-    const links = Array.isArray(source?.links) ? source.links.slice(0,500).filter(link=>
+    const links = Array.isArray(source?.links) ? source.links.slice(0,maxLinks).filter(link=>
       link && link.from !== link.to && ids.has(link.from) && ids.has(link.to)
     ).map(({from,to})=>({from,to})) : [];
     return project.canvasBoard = {
@@ -109,6 +117,7 @@
     if (page.hidden) return;
     if (drag) stopDrag(true);
     persist();
+    releaseVideos();
     page.hidden = true;
     editor.closest("main").classList.remove("canvas-open");
     navigation.classList.remove("canvas-nav-active");
@@ -177,7 +186,7 @@
         const from = linkFrom, to = node.id;
         const existing = board.links.findIndex(link=>(link.from === from && link.to === to) || (link.from === to && link.to === from));
         if (existing >= 0) board.links.splice(existing,1);
-        else if (board.links.length < 500) board.links.push({from,to});
+        else if (board.links.length < maxLinks) board.links.push({from,to});
         linkFrom = null;
         linking = false;
         persist();
@@ -187,9 +196,32 @@
     updateSelection();
   }
 
+  function releaseVideos() {
+    for (const [id,url] of videoUrls) {
+      const video = cards.get(id)?.querySelector("video");
+      if (video) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      URL.revokeObjectURL(url);
+    }
+    videoUrls.clear();
+    world.replaceChildren();
+    cards.clear();
+  }
+
   function render() {
-    cards = new Map();
+    for (const [id,card] of cards) {
+      if (board.nodes.some(node=>node.id === id)) continue;
+      card.querySelector("video")?.pause();
+      card.remove();
+      if (videoUrls.has(id)) URL.revokeObjectURL(videoUrls.get(id));
+      videoUrls.delete(id);
+      cards.delete(id);
+    }
     for (const node of board.nodes) {
+      if (cards.has(node.id)) continue;
       const card = document.createElement("article");
       card.className = "canvas-card canvas-" + node.kind;
       card.dataset.node = node.id;
@@ -197,19 +229,31 @@
       setPosition(node,card);
       const head = document.createElement("div");
       head.className = "canvas-card-head";
-      head.textContent = node.title;
+      head.textContent = kinds[node.kind] + " · " + node.title;
+      head.title = node.title;
       card.setAttribute("aria-label",node.title);
       card.append(head);
-      if (node.kind === "note") {
+      if (node.kind === "text") {
         const input = document.createElement("textarea");
-        input.setAttribute("aria-label","便签内容");
+        input.setAttribute("aria-label","文本节点内容");
         input.placeholder = "写下灵感或镜头备注…";
-        input.maxLength = 2000;
+        input.maxLength = 12000;
         input.value = node.text;
         input.oninput = () => { node.text = input.value; deferSave(); };
         card.append(input);
       } else {
-        if (node.image) {
+        if (node.kind === "video" && isVideo(node.video)) {
+          const video = document.createElement("video");
+          const url = URL.createObjectURL(node.video);
+          videoUrls.set(node.id,url);
+          video.controls = true;
+          video.playsInline = true;
+          video.preload = "none";
+          video.poster = node.image;
+          video.addEventListener("error",()=>showMessage("无法播放此视频，请试试 H.264 MP4 或 WebM。"));
+          video.src = url;
+          card.append(video);
+        } else if (node.image) {
           const image = document.createElement("img");
           image.src = node.image;
           image.alt = "";
@@ -220,14 +264,20 @@
           const details = document.createElement("p");
           details.textContent = node.text;
           card.append(details);
+          const extract = document.createElement("button");
+          extract.type = "button";
+          extract.className = "button secondary canvas-extract";
+          extract.textContent = "一键导入素材";
+          extract.onclick = () => extractShot(node);
+          card.append(extract);
         }
       }
       card.addEventListener("focusin",()=>{
         if (!linking) { picked = node.id; updateSelection(); }
       });
       cards.set(node.id,card);
+      world.append(card);
     }
-    world.replaceChildren(...cards.values());
     empty.hidden = board.nodes.length > 0;
     updateSelection();
     draw();
@@ -250,29 +300,94 @@
         y = baseY + Math.floor(cell/columns.length)*(height+28);
       }
     }
-    const node = {id:crypto.randomUUID(),kind,x,y,title:"",text:"",image:"",...payload};
+    const node = {id:crypto.randomUUID(),kind,x,y,title:"",text:"",image:"",video:null,...payload};
     board.nodes.push(node);
     picked = node.id;
     return node;
   }
 
-  async function importImages(files, position) {
+  function shotText(shot) {
+    return [shot.direction,shot.line].filter((text,index,values)=>text?.trim() && values.indexOf(text) === index).join("\n\n");
+  }
+
+  function shotImage(shot) {
+    return [shot.image,shot.videoPoster].map(src=>artSource(src || "")).find(isImage) || "";
+  }
+
+  function extractShot(node) {
+    const legacy = /^第 (\d+) 镜 · (.*)$/.exec(node.title);
+    const candidate = legacy && project.shots[Number(legacy[1])-1];
+    const shot = node.shotId ? project.shots.find(shot=>shot.canvasSourceId === node.shotId) :
+      candidate && (candidate.name || "未命名分镜") === legacy[2] ? candidate : null;
+    const text = shot ? shotText(shot) || node.text : node.text;
+    const image = shot ? shotImage(shot) : node.image;
+    const choices = [
+      ["text","分镜文字",text.trim() && {text:text.slice(0,12000)}],
+      ["image","首帧图",isImage(image) && {image}],
+      ["video","分镜视频",isVideo(shot?.video) && {video:shot.video,image:isImage(image) ? image : ""}]
+    ];
+    const available = choices.filter(([, ,payload])=>payload);
+    const existing = board.nodes.filter(item=>item.sourceNode === node.id);
+    const missing = available.filter(([kind])=>!existing.some(item=>item.kind === kind));
+    if (!missing.length) {
+      showMessage(available.length ? "已有素材节点已保留，删除节点后可重新导入。" : "该分镜暂无可导入的素材。");
+      return;
+    }
+    if (missing.length > maxCards-board.nodes.length) {
+      showMessage("画布空间不足，请删除部分节点后重新导入。");
+      return;
+    }
+    if (shot && !node.shotId) node.shotId = shot.canvasSourceId ||= crypto.randomUUID();
+    const added = missing.map(([kind,title,payload],index)=>{
+      const x = node.x + width + 64;
+      let y = node.y + index*(height+32);
+      while (board.nodes.some(item=>Math.abs(item.x-x)<width+18 && Math.abs(item.y-y)<height+18)) y += height+32;
+      return add(kind,{title:(node.title + " · " + title).slice(0,160),sourceNode:node.id,...payload},
+        {x:x+width/2,y:y+height/2});
+    });
+    for (const item of added) {
+      if (board.links.length < maxLinks) board.links.push({from:node.id,to:item.id});
+    }
+    picked = node.id;
+    render();
+    fit([node,...added]);
+    showMessage("已导入" + missing.map(([,title])=>title).join("、") + (shot && !shot.video ? "。本镜暂无视频。" : "。"));
+  }
+
+  function mediaKind(file) {
+    if (file.type.startsWith("image/") || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(file.name)) return "image";
+    if (file.type.startsWith("video/") || /\.(?:mp4|webm|m4v|mov)$/i.test(file.name)) return "video";
+    return null;
+  }
+
+  async function importMedia(files, position, kind) {
     const target = board;
     let imported = 0, failed = 0;
-    showMessage("正在导入图片…");
+    showMessage("正在读取素材…");
     for (const file of files) {
       if (target !== board || target !== project.canvasBoard || page.hidden || target.nodes.length >= maxCards) break;
       try {
-        const image = await compressImage(file);
+        const type = kind || mediaKind(file);
+        let payload;
+        if (type === "image") {
+          const image = await compressImage(file);
+          if (!isImage(image)) throw Error("图片不可用");
+          payload = {image};
+        } else if (type === "video") {
+          const clip = await loadClip(file);
+          releaseClip(clip);
+          payload = {video:file.type.startsWith("video/") ? file : file.slice(0,file.size,"application/octet-stream")};
+        } else { failed++; continue; }
         if (target === board && target === project.canvasBoard && !page.hidden &&
-            add("image",{title:file.name.slice(0,160),image},position)) imported++;
+            add(type,{title:file.name.slice(0,160),...payload},position)) imported++;
       } catch { failed++; }
     }
-    if (target !== board || page.hidden) return;
+    if (target !== board || target !== project.canvasBoard || page.hidden) return;
     render();
     persist();
-    showMessage(imported ? "已导入 " + imported + " 张图片" + (failed ? "，" + failed + " 张无法读取。" : "。") :
-      failed ? "图片无法读取，请换一张图片。" : "没有添加图片。");
+    const remaining = files.length-imported-failed;
+    showMessage("已导入 " + imported + " 个素材" + (failed ? "，" + failed + " 个无法读取" : "") +
+      (remaining ? "，" + remaining + " 个未添加（画布最多 200 个节点）" : "") + "。");
   }
 
   function zoomTo(z, clientX,clientY) {
@@ -286,13 +401,13 @@
     deferSave();
   }
 
-  function fit() {
-    if (!board.nodes.length) {
+  function fit(nodes = board.nodes) {
+    if (!nodes.length) {
       board.view = {x:36,y:36,z:1};
     } else {
-      const left = Math.min(...board.nodes.map(node=>node.x)), top = Math.min(...board.nodes.map(node=>node.y));
-      const w = Math.max(...board.nodes.map(node=>node.x+width))-left;
-      const h = Math.max(...board.nodes.map(node=>node.y+height))-top;
+      const left = Math.min(...nodes.map(node=>node.x)), top = Math.min(...nodes.map(node=>node.y));
+      const w = Math.max(...nodes.map(node=>node.x+width))-left;
+      const h = Math.max(...nodes.map(node=>node.y+height))-top;
       const z = clamp(Math.min((surface.clientWidth-70)/w,(surface.clientHeight-108)/h,1),minZoom,maxZoom);
       board.view = {z,x:(surface.clientWidth-w*z)/2-left*z,y:(surface.clientHeight-45-h*z)/2-top*z};
     }
@@ -323,22 +438,28 @@
   entry.onclick = open;
   navigation.querySelectorAll("[data-step]").forEach(button=>button.addEventListener("click",()=>close(),{capture:true}));
   action("back").onclick = ()=>close(true);
-  action("note").onclick = ()=>{
-    const node = add("note",{title:"便签"});
+  action("text").onclick = ()=>{
+    const node = add("text",{title:"新文本"});
     if (!node) return;
     render();
     persist();
     cards.get(node.id)?.querySelector("textarea").focus();
   };
-  action("image").onclick = ()=>fileInput.click();
-  fileInput.onchange = ()=>{ const files = [...fileInput.files]; fileInput.value = ""; if (files.length) void importImages(files); };
+  for (const kind of ["image","video"]) {
+    const button = action(kind), input = button.nextElementSibling;
+    button.onclick = ()=>input.click();
+    input.onchange = ()=>{
+      const files = [...input.files];
+      input.value = "";
+      if (files.length) void importMedia(files,undefined,kind);
+    };
+  }
   action("shot").onclick = ()=>{
     const index = Number(shotSelect.value), shot = project.shots[index];
     if (!shot) return;
-    const image = artSource(shot.videoPoster || shot.image || "");
     const title = shot.name || "未命名分镜";
-    const node = add("shot",{title:"第 " + (index+1) + " 镜 · " + title,text:(shot.direction || shot.line || "").slice(0,360),
-      image:isImage(image) ? image : ""});
+    const node = add("shot",{title:("第 " + (index+1) + " 镜 · " + title).slice(0,160),text:shotText(shot).slice(0,12000),
+      image:shotImage(shot),shotId:shot.canvasSourceId ||= crypto.randomUUID()});
     if (!node) return;
     render();
     persist();
@@ -349,10 +470,10 @@
   action("in").onclick = ()=>zoomTo(board.view.z*1.25);
   action("out").onclick = ()=>zoomTo(board.view.z/1.25);
   action("reset").onclick = ()=>zoomTo(1);
-  action("fit").onclick = fit;
+  action("fit").onclick = ()=>fit();
 
   surface.addEventListener("pointerdown",event=>{
-    if (page.hidden || (event.button !== 0 && event.button !== 1) || event.target.closest("button,.canvas-status")) return;
+    if (page.hidden || (event.button !== 0 && event.button !== 1) || event.target.closest("button,video,.canvas-status")) return;
     const card = event.target.closest("[data-node]");
     if (event.button === 0 && event.target.closest("textarea") && !linking) return;
     const node = event.button === 0 && board.nodes.find(item=>item.id === card?.dataset.node);
@@ -382,13 +503,13 @@
     surface.addEventListener(type,event=>{ if (drag?.pointer === event.pointerId) stopDrag(true); });
   }
   surface.addEventListener("wheel",event=>{
-    if (event.target.closest("textarea") && !event.ctrlKey && !event.metaKey) return;
+    if (event.target.closest("textarea,.canvas-shot p") && !event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     const delta = event.deltaY * (event.deltaMode===1 ? 16 : 1);
     zoomTo(board.view.z*Math.exp(-delta*.0018),event.clientX,event.clientY);
   },{passive:false});
   surface.addEventListener("keydown",event=>{
-    if (event.target.closest("textarea,button")) return;
+    if (event.target.closest("textarea,button,video")) return;
     const node = board.nodes.find(item=>item.id === picked);
     const delta = {ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[event.key];
     if (delta) {
@@ -417,8 +538,8 @@
   });
   surface.addEventListener("drop",event=>{
     event.preventDefault();
-    const files = [...event.dataTransfer.files].filter(file=>file.type.startsWith("image/"));
-    if (files.length) void importImages(files,coordinates(event.clientX,event.clientY));
+    const files = [...event.dataTransfer.files];
+    if (files.length) void importMedia(files,coordinates(event.clientX,event.clientY));
   });
   new ResizeObserver(draw).observe(surface);
 })();

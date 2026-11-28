@@ -1,6 +1,7 @@
 (() => {
   const running = new WeakSet();
   const messages = new WeakMap();
+  const pendingText = "生成耗时较长，完成后自动显示";
   let enabled = false;
   let models = [];
   let accessCheck = 0;
@@ -114,7 +115,7 @@
     const generate = document.createElement("button");
     generate.type = "button";
     generate.className = "button primary";
-    generate.textContent = running.has(shot) ? "生成处理中…" : shot.wanJob ? "继续查询视频" : canvas ? "生成视频" : "生成动画";
+    generate.textContent = running.has(shot) ? pendingText : shot.wanJob ? "继续查询视频" : canvas ? "生成视频" : "生成动画";
     const inputError = canvas && !inputs.prompt ? "请连接有内容的文本或分镜节点。" : "";
     generate.disabled = running.has(shot) || (!shot.wanJob && (canvas ? Boolean(inputError) : !canAnimate(shot)));
     generate.onclick = () => void animate(shot,settings,model,canvas,inputs);
@@ -129,7 +130,7 @@
     }
     const status = document.createElement("small");
     status.setAttribute("role","status");
-    status.textContent = messages.get(shot) || (shot.wanJob ? "已提交任务，可继续查询。" :
+    status.textContent = messages.get(shot) || (shot.wanJob ? pendingText + "。点击「继续查询视频」可恢复自动查询。" :
       canvas ? inputError : canAnimate(shot) ? "" : "先生成或导入本镜首帧图。");
     if (canvas) {
       const summary = document.createElement("small");
@@ -172,7 +173,7 @@
       refresh();
     };
     running.add(shot);
-    report(shot.wanJob ? "正在查询任务…" : "正在提交素材…");
+    report(pendingText);
     try {
       if (!shot.wanJob) {
         const requestId = shot.videoRequestId || crypto.randomUUID();
@@ -244,10 +245,10 @@
           notify(canvas ? "视频已加入画布节点。" : "动画已生成并加入分镜。");
           return;
         }
-        report("正在生成动画，可先编辑其他分镜。");
+        report(pendingText);
         await new Promise(resolve => setTimeout(resolve,15000));
       }
-      report("任务仍在生成，可点「继续查询动画」。");
+      report(pendingText + "。点击「继续查询视频」可恢复自动查询。");
     } catch (error) {
       if (shot.videoRequestId && error.status >= 400 && error.status < 500) {
         delete shot.videoRequestId;
